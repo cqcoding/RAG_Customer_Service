@@ -1,0 +1,200 @@
+{
+  "info": {
+    "name": "RAG Customer Service API",
+    "description": "REST API para Sistema RAG com Logging Estruturado",
+    "version": "1.0.0",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health & Status",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            },
+            "description": "Verifica se a API está saudável"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Queries",
+      "item": [
+        {
+          "name": "Execute Query",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"Quais produtos estão em promoção?\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/query",
+              "host": ["{{base_url}}"],
+              "path": ["query"]
+            },
+            "description": "Executa uma query no sistema RAG e retorna a resposta sintetizada"
+          },
+          "response": []
+        },
+        {
+          "name": "Execute Query - Order status",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"Qual o status do pedido 8?\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/query",
+              "host": ["{{base_url}}"],
+              "path": ["query"]
+            },
+            "description": "Query para análise de sentimento"
+          },
+          "response": []
+        },
+        {
+          "name": "Execute Query - Follow-up with history",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"E tem desconto?\",\n  \"history\": [\n    {\"role\": \"user\", \"content\": \"Quanto custa o Ohana CK-20?\"},\n    {\"role\": \"assistant\", \"content\": \"O Ohana CK-20 Concert Natural custa R$ 549,00.\"}\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/query",
+              "host": ["{{base_url}}"],
+              "path": ["query"]
+            },
+            "description": "Query para sistema de Q&A"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "File Management",
+      "item": [
+        {
+          "name": "Upload File",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/upload",
+              "host": ["{{base_url}}"],
+              "path": ["upload"]
+            },
+            "description": "Faz upload de um novo arquivo para indexar (tipos: .txt, .pdf, .html, .htm)"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Logs & Monitoring",
+      "item": [
+        {
+          "name": "Get LLM Calls Log",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/logs/llm-calls?limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["logs", "llm-calls"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Número máximo de logs a retornar"
+                }
+              ]
+            },
+            "description": "Retorna as últimas chamadas LLM com details (prompt, response, latência)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Statistics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/logs/stats",
+              "host": ["{{base_url}}"],
+              "path": ["logs", "stats"]
+            },
+            "description": "Retorna estatísticas agregadas (total de chamadas, latência média, por agente)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Routing Decisions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/logs/routing-decisions?limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["logs", "routing-decisions"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "10",
+                  "description": "Número máximo de decisões a retornar"
+                }
+              ]
+            },
+            "description": "Retorna as últimas decisões de roteamento (qual query foi para quais agentes)"
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    }
+  ]
+}

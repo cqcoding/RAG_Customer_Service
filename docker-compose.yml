@@ -1,0 +1,75 @@
+services:
+  # FastAPI REST API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@postgres:5432/${POSTGRES_DB:-store}
+    volumes:
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command: python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    networks:
+      - rag-network
+
+  # Streamlit Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@postgres:5432/${POSTGRES_DB:-store}
+    volumes:
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+      - ./logs:/app/logs
+    depends_on:
+      - api
+    restart: unless-stopped
+    command: streamlit run src/front-end/interface.py --server.port=8501 --server.address=0.0.0.0
+    networks:
+      - rag-network
+
+  # Chroma runs embedded in the api/frontend processes, persisted in the
+  # ./chroma_db volume above, so it needs no service of its own.
+
+  # PostgreSQL (store data: products, orders, customers, promotions)
+  # Load the CSVs with: docker compose run --rm api python -m src.utils.create_sql_db
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      # Host port is configurable in case 5432 is taken by a local Postgres.
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-rag}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-rag}
+      - POSTGRES_DB=${POSTGRES_DB:-store}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+volumes:
+  postgres-data:
+
+networks:
+  rag-network:
+    driver: bridge
