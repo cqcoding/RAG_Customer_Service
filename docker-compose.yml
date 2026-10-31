@@ -1,0 +1,60 @@
+services:
+  # FastAPI REST API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+      - ./logs:/app/logs
+    depends_on:
+      - chroma
+    restart: unless-stopped
+    command: python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    networks:
+      - rag-network
+
+  # Streamlit Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./chroma_db:/app/chroma_db
+      - ./logs:/app/logs
+    depends_on:
+      - api
+    restart: unless-stopped
+    command: streamlit run src/front-end/interface.py --server.port=8501 --server.address=0.0.0.0
+    networks:
+      - rag-network
+
+  # ChromaDB (Vector Database)
+  chroma:
+    image: ghcr.io/chroma-core/chroma:latest
+    ports:
+      - "8007:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    environment:
+      - ANONYMIZED_TELEMETRY=False
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+volumes:
+  chroma-data:
+
+networks:
+  rag-network:
+    driver: bridge
