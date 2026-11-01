@@ -1,43 +1,57 @@
-# REST API - Integration Guide
+# REST API
 
-## Overview
+The REST API exposes the assistant to other applications (a website chat
+widget, WhatsApp integration, tests…) and gives access to the logs.
 
-API REST que expõe todas as funcionalidades do sistema RAG:
-- Execução de queries
-- Upload de arquivos
-- Monitoramento e logs em tempo real
+- Code: `src/api/main.py` (FastAPI)
+- Base URL: `http://localhost:8000`
+- Interactive docs: **http://localhost:8000/docs** (Swagger UI) and
+  http://localhost:8000/redoc
+- Postman collection: [`docs/postman_collection.json`](postman_collection.json)
 
-## Setup
+---
 
-### 1. Instalar dependências
+## Starting the API
+
+**With Docker** (see [DOCKER.md](DOCKER.md)), the API starts with the rest of the stack:
 
 ```bash
-pip install fastapi uvicorn python-multipart
+make docker-up
 ```
 
-### 2. Iniciar o servidor
+**Locally**, with PostgreSQL running and the data loaded (`make db-up` and
+`make load-db`):
 
 ```bash
-# Desenvolvimento
+source venv/bin/activate
 python -m uvicorn src.api.main:app --reload --port 8000
-
-# Ou usando:
-python -m src.api.main
 ```
 
-Servidor rodando em: `http://localhost:8000`
+`--reload` restarts the server when code changes, which is useful during
+development. `python -m src.api.main` also works, without auto-reload.
 
-Documentação automática (Swagger UI): `http://localhost:8000/docs`
+The first question after startup is slower: the embedding model is loaded
+on first use.
+
+---
 
 ## Endpoints
 
-### Health Check
-```
-GET /health
-```
-Verifica se a API está saudável.
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Is the API up? |
+| `POST` | `/query` | Ask the assistant a question |
+| `GET` | `/logs/llm-calls` | Latest log events |
+| `GET` | `/logs/stats` | LLM call counts and average latency |
+| `GET` | `/logs/routing-decisions` | Which agents handled each question |
 
-**Response:**
+---
+
+### `GET /health`
+
+Returns a fixed payload when the server is running. It doesn't check the
+database or the LLM provider.
+
 ```json
 {
   "status": "healthy",
@@ -48,194 +62,193 @@ Verifica se a API está saudável.
 
 ---
 
-### Execute Query
-```
-POST /query
+### `POST /query`
+
+Runs the full workflow (router → agents → synthesizer) and returns the
+answer.
+
+**Request body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `query` | string | yes | The customer's message |
+| `history` | list of `{role, content}` | no | Previous turns, oldest first. `role` is `"user"` or `"assistant"`. Send it to make follow-up questions work. Defaults to `[]` |
+
+The API is **stateless**: it doesn't remember conversations. The client keeps
+the history and sends it with each request. Only the last 6 messages are
+used, each cut to 600 characters.
+
+**Response**
+
+| Field | Type | Description |
+|---|---|---|
+| `query` | string | The question, echoed |
+| `final_answer` | string | The assistant's reply, in the language of the question |
+| `latency_ms` | number | Total processing time |
+| `status` | string | `"success"` |
+
+**Example: a single question**
+
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Quais produtos estão em promoção?"}'
 ```
 
-Executa uma query no sistema RAG.
-
-**Request:**
 ```json
 {
-  "query": "What are the financial metrics?"
-}
-```
-
-**Response:**
-```json
-{
-  "query": "What are the financial metrics?",
-  "final_answer": "...",
-  "latency_ms": 1250.5,
+  "query": "Quais produtos estão em promoção?",
+  "final_answer": "Temos 4 produtos em promoção no momento:\n- Kalani KAL-700T Tenor Natural: de R$ 359,00 por R$ 323,10 (10% off)\n- Ohana CK-20 Concert Natural: de R$ 549,00 por R$ 439,20 (20% off)\n- Crafter HT-100 Folk Aço Natural: de R$ 2.399,00 por R$ 1.967,18 (18% off)\n- Taylor 110e Dreadnought Natural: de R$ 5.999,00 por R$ 5.519,08 (8% off)",
+  "latency_ms": 4210.7,
   "status": "success"
 }
 ```
 
+(The wording of `final_answer` varies between runs; the facts come from the
+database.)
+
+**Example: a follow-up question**
+
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "E tem desconto?",
+    "history": [
+      {"role": "user", "content": "Quanto custa o Ohana CK-20?"},
+      {"role": "assistant", "content": "O Ohana CK-20 Concert Natural custa R$ 549,00."}
+    ]
+  }'
+```
+
+The router turns *"E tem desconto?"* into *"Does the Ohana CK-20 have an
+active promotion, and what's the discounted price?"* before querying the
+database.
+
+**Example: an order**
+
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Qual o status do pedido 8?"}'
+```
+
+Orders are looked up by order number or tracking code. The assistant never
+returns customers' names, phones or e-mails, and doesn't list orders or
+customers in bulk.
+
+**Errors**
+
+| Status | When | Body |
+|---|---|---|
+| `422` | Invalid body: missing `query`, or a `history` role other than `user`/`assistant` | FastAPI validation details |
+| `500` | Unexpected failure in the workflow | `{"detail": "<ErrorType>: <message>"}` |
+
+Problems inside the workflow usually **don't** produce a `500`. If the LLM
+provider or the database is unavailable, the agents report the error
+internally and `final_answer` contains a polite fallback message, with
+`status: "success"`. Check the logs to tell the two cases apart.
+
 ---
 
-### Upload File
-```
-POST /upload
-```
+### `GET /logs/llm-calls?limit=100`
 
-Faz upload de um arquivo para indexar.
+Returns the latest events from `logs/llm_calls.jsonl`. Despite the name, this
+includes **all event types** (`llm_call`, `routing_decision`,
+`agent_execution`, `synthesis`, `error`), because they share one log file.
+See [LOGGING.md](LOGGING.md) for each event's fields.
 
-**Request:**
-```
-Content-Type: multipart/form-data
-file: <arquivo>
-```
+| Parameter | Default | Description |
+|---|---|---|
+| `limit` | 100 | Maximum number of events, the most recent ones |
 
-Tipos suportados: `.txt`, `.pdf`, `.html`, `.htm`
-
-**Response:**
-```json
-{
-  "filename": "documento.pdf",
-  "status": "success",
-  "message": "Arquivo 'documento.pdf' indexado com sucesso."
-}
-```
-
----
-
-### Get LLM Calls Log
-```
-GET /logs/llm-calls?limit=20
-```
-
-Retorna as últimas chamadas LLM com detalhes completos.
-
-**Query Parameters:**
-- `limit` (int, default=100): Número máximo de logs
-
-**Response:**
 ```json
 {
   "logs": [
     {
-      "timestamp": "2026-02-12T10:30:45.123456",
+      "timestamp": "2026-11-01T14:03:12.481022",
       "event_type": "llm_call",
       "provider": "openrouter",
-      "model": "free",
+      "model": "google/gemini-2.5-flash-lite",
       "agent": "classifier",
       "status": "success",
-      "latency_ms": 1250.5,
-      "prompt_length": 342,
-      "response_length": 156,
-      "prompt": "...",
-      "response": "..."
+      "latency_ms": 812.4,
+      "tokens": {},
+      "prompt_length": 46,
+      "response_length": 131,
+      "prompt": "Qual o status do pedido 8?",
+      "response": "{\"classifications\": [{\"source\": \"store_database\", \"query\": \"Qual o status do pedido 8?\"}]}",
+      "error": null
     }
   ],
-  "total": 42,
-  "limit": 20
+  "total": 214,
+  "limit": 100
 }
 ```
 
 ---
 
-### Get Statistics
-```
-GET /logs/stats
-```
+### `GET /logs/stats`
 
-Retorna estatísticas agregadas.
+Aggregates the `llm_call` events. Only the **router** (`classifier`) and the
+**synthesizer** log their LLM calls, so those are the agents that appear.
 
-**Response:**
 ```json
 {
   "total_llm_calls": 42,
   "avg_latency_ms": 950.34,
   "calls_by_agent": {
-    "classifier": 10,
-    "data_extractor": 10,
-    "sentiment_analyst": 10,
-    "question_answerer": 10,
-    "synthesizer": 2
+    "classifier": 21,
+    "synthesizer": 21
   }
 }
 ```
 
 ---
 
-### Get Routing Decisions
-```
-GET /logs/routing-decisions?limit=10
-```
+### `GET /logs/routing-decisions?limit=50`
 
-Retorna as últimas decisões de roteamento.
+Returns the latest routing decisions: which agents were chosen for each
+question. Useful to debug wrong answers, which often start with a wrong
+route.
 
-**Query Parameters:**
-- `limit` (int, default=50): Número máximo de decisões
-
-**Response:**
 ```json
 {
   "decisions": [
     {
-      "timestamp": "2026-02-12T10:30:45.123456",
+      "timestamp": "2026-11-01T14:03:12.480511",
       "event_type": "routing_decision",
-      "user_query": "What are the financial metrics?",
-      "agents_selected": ["data_extractor", "sentiment_analyst"],
+      "user_query": "Meu pedido 5 chegou com defeito, posso trocar?",
+      "agents_selected": ["store_database", "question_answerer"],
       "num_agents": 2
     }
   ],
-  "total": 5,
-  "limit": 10
+  "total": 21,
+  "limit": 50
 }
 ```
 
-## Coleção Postman
+---
 
-### Variáveis de Ambiente
+## Postman collection
 
-A coleção vem pré-configurada com:
-- `base_url`: `http://localhost:8000`
+Import [`docs/postman_collection.json`](postman_collection.json) into Postman.
+It uses one variable, `base_url` (default `http://localhost:8000`), and has
+three folders:
 
+1. **Health & Status**: health check.
+2. **Queries**: a promotions question, an order status question, and a
+   follow-up question with `history`.
+3. **Logs & Monitoring**: the three log endpoints.
 
-### Exemplo de Uso
+---
 
-1. **Health Check**: Verifica se API está rodando
-2. **Execute Query**: Envie uma pergunta
-3. **Get Statistics**: Veja métricas de execução
-4. **Get Routing Decisions**: Inspecione qual agente processou cada query
+## Notes
 
-## Casos de Uso
-
-### 1. Buscar informações financeiras
-```bash
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What are the financial metrics for the last quarter?"}'
-```
-
-### 2. Fazer upload de novo arquivo
-```bash
-curl -X POST http://localhost:8000/upload \
-  -F "file=@documento.pdf"
-```
-
-### 3. Monitorar performance
-```bash
-curl http://localhost:8000/logs/stats
-```
-
-### 4. Debugar roteamento
-```bash
-curl http://localhost:8000/logs/routing-decisions?limit=5
-```
-
-## Docs Automática
-FastAPI gera documentação interativa automática:
-
-**Swagger UI (Recomendado)**:
-```
-http://localhost:8000/docs
-```
-
-**ReDoc**:
-```
-http://localhost:8000/redoc
-```
-
+- **No authentication.** The API is meant to run behind another service or
+  on a private network. Don't expose it publicly as is: anyone could spend
+  your OpenRouter credits and look up orders by number.
+- **CORS** isn't configured. A browser front-end on another origin would
+  need FastAPI's `CORSMiddleware`.
+- **Docker vs. local logs.** In Docker, the API reads the logs in the
+  `app-logs` volume; locally, it reads `./logs`.

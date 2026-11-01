@@ -1,121 +1,215 @@
-# Sistema de Logging e Tracing
+# Logging
 
-## Funcionalidades
+Every question leaves a trail: which agents the router chose, what each agent
+returned, each LLM call (model, latency, prompt, response) and the final
+answer. This is the main tool for understanding a wrong answer or a slow one.
 
-1. **Todas as chamadas LLM**: prompt, response, latência, tokens
-2. **Execução de agentes**: input, output, tempo de execução, status
-3. **Decisões de roteamento**: qual query foi para quais agentes
-4. **Síntese final**: agregação de resultados
+Files: `src/utils/logger.py`, `src/utils/view_logs.py`, plus the log
+endpoints in `src/api/main.py`.
 
-## Arquitetura
+---
 
-### `src/utils/logger.py`
-- **StructuredLogger**: Classe central para logging estruturado
-- Escreve em dois formatos:
-  - **llm_calls.jsonl**: Logs JSON estruturados (fácil parsing)
-  - **trace.log**: Logs em texto legível (debugging rápido)
+## Where logs go
 
-### `src/utils/tracing.py`
-- **Tracer**: Context manager para timing automático
-- **@trace_llm_call**: Decorator para envolver chamadas LLM
+`StructuredLogger` (`src/utils/logger.py`) writes **every event** as one line
+of JSON to three places:
 
-### `src/agents/orchestrator.py`
-- Integrado logging em:
-  - `classify_query`: Registra decisão de roteamento + chamada LLM
-  - `data_extractor`, `sentiment_analyst`, `question_answerer`: Registram execução de agentes
-  - `synthesize_results`: Registra síntese final + chamada LLM
+| Output | Format | Use |
+|---|---|---|
+| `logs/llm_calls.jsonl` | One JSON object per line | Machine-readable: read by the API endpoints and the viewer |
+| `logs/trace.log` | Timestamp, level, then the same JSON | Human-readable, with timestamps |
+| Console | Same as `trace.log` | Live view while the app runs (and in `docker compose logs`) |
 
-## Logs Gerados
+`logs/` is created automatically in the current directory, and is
+git-ignored. In Docker it is the `app-logs` volume (see [DOCKER.md](DOCKER.md)).
 
-### llm_calls.jsonl (JSON Lines)
-Cada linha é um JSON com estrutura:
+Despite its name, `llm_calls.jsonl` contains **all** event types, not only
+LLM calls. Filter on `event_type`.
+
+---
+
+## Event types
+
+A typical question produces this sequence:
+
+```
+routing_decision  →  llm_call (classifier)  →  agent_execution (×1 or 2)  →  synthesis  →  llm_call (synthesizer)
+```
+
+### `routing_decision`
+
+Logged by the router after a successful classification.
+
 ```json
 {
-  "timestamp": "2026-02-12T10:30:45.123456",
-  "event_type": "llm_call",
-  "provider": "openrouter",
-  "model": "free",
-  "agent": "classifier",
-  "status": "success",
-  "latency_ms": 1250.5,
-  "tokens": {},
-  "prompt_length": 342,
-  "response_length": 156,
-  "prompt": "...",
-  "response": "..."
+  "timestamp": "2026-11-01T14:03:12.480511",
+  "event_type": "routing_decision",
+  "user_query": "Meu pedido 5 chegou com defeito, posso trocar?",
+  "agents_selected": ["store_database", "question_answerer"],
+  "num_agents": 2
 }
 ```
 
-### trace.log (Texto legível)
-```
-2026-02-12 10:30:45,123 - INFO - {"timestamp": "...", "event_type": "agent_execution", ...}
+`agents_selected` is empty for small talk and off-topic messages.
+
+### `llm_call`
+
+Logged for the **router** (`agent: "classifier"`) and the **synthesizer**
+(`agent: "synthesizer"`). The agents' own LLM calls aren't logged as
+`llm_call`; their inputs and outputs appear in `agent_execution`.
+
+```json
+{
+  "timestamp": "2026-11-01T14:03:12.481022",
+  "event_type": "llm_call",
+  "provider": "openrouter",
+  "model": "google/gemini-2.5-flash-lite",
+  "agent": "classifier",
+  "status": "success",
+  "latency_ms": 812.4,
+  "tokens": {},
+  "prompt_length": 134,
+  "response_length": 131,
+  "prompt": "Conversation so far:\nCustomer: Quanto custa o Ohana CK-20?\n…\nCurrent message: e tem desconto?",
+  "response": "{\"classifications\": [{\"source\": \"store_database\", …}]}",
+  "error": null
+}
 ```
 
-## Usando o Viewer
+- `model` is the model that actually answered, so it shows when a fallback
+  model was used.
+- `prompt` and `response` are cut to 500 characters; `prompt_length` and
+  `response_length` are the full sizes.
+- For the router, `prompt` is the conversation excerpt plus the current
+  message. For the synthesizer, it's the agents' results.
+- `tokens` is always empty: OpenRouter's token counts aren't read yet.
+- On failure, `status` is `"error"` and `error` holds the message.
 
-Script interativo para inspecionar logs:
+### `agent_execution`
+
+Logged for each agent run (`question_answerer`, `store_database`).
+
+```json
+{
+  "timestamp": "2026-11-01T14:03:13.902877",
+  "event_type": "agent_execution",
+  "agent": "store_database",
+  "status": "success",
+  "latency_ms": 1421.3,
+  "input": "Qual o status, data de entrega e itens do pedido 5?",
+  "output": "{\"query\": \"Qual o status…\", \"status\": \"success\", \"sql\": \"SELECT o.status, …",
+  "error": null
+}
+```
+
+- `input` is the agent's sub-question, which may differ from the user's
+  words (see [ARCHITECTURE.md §5.3](ARCHITECTURE.md#53-the-router-classify_query)).
+- `output` is the agent's result as JSON, cut to 200 characters. For
+  `store_database` it starts with the generated SQL, which is usually what you
+  need when an answer is wrong.
+- `status` is `"error"` when the agent reported an error (for example, the
+  SQL failed twice) or crashed.
+
+### `synthesis`
+
+```json
+{
+  "timestamp": "2026-11-01T14:03:15.120034",
+  "event_type": "synthesis",
+  "user_query": "Meu pedido 5 chegou com defeito, posso trocar?",
+  "results_aggregated": 2,
+  "final_answer": "Seu pedido 5 (Crafter D-8 Dreadnought Natural) consta como entregue…",
+  "latency_ms": 1217.6
+}
+```
+
+`final_answer` is cut to 300 characters.
+
+### `error`
+
+Logged by the API when `/query` raises, with the full stack trace and the
+request context.
+
+```json
+{
+  "timestamp": "…",
+  "event_type": "error",
+  "error_type": "OperationalError",
+  "message": "connection failed: …",
+  "stack_trace": "Traceback (most recent call last): …",
+  "context": {"query": "…", "latency_ms": 5012.3}
+}
+```
+
+---
+
+## Reading the logs
+
+### Interactive viewer
 
 ```bash
 python src/utils/view_logs.py
 ```
 
-Opções:
-1. **Visualizar logs de chamadas LLM**: Todas as chamadas LLM com provider/model/latência
-2. **Visualizar execução de agentes**: Execução de cada agente com tempo
-3. **Visualizar decisões de roteamento**: Quais agentes foram chamados para cada query
-4. **Visualizar estatísticas**: Contagem e latência média por agente
-5. **Visualizar todos os logs e estatísticas**: Exibe tudo
+Run it from the project root (it reads `./logs`). Options:
 
-## Exemplo de Saída
+1. **LLM calls**: model, agent, status, latency, and the start of the prompt
+   and response of each call.
+2. **Agent executions**: the `agent_execution` lines from `trace.log`.
+3. **Routing decisions**: question → agents chosen.
+4. **Statistics**: number of LLM calls, average latency, calls per agent.
+5. **Everything** above.
 
-```
-================================================================================
-LOGS DE CHAMADAS LLM
-================================================================================
+### API endpoints
 
-[2026-02-12T10:30:45.123456] openrouter - free
-  Agent: classifier
-  Status: success
-  Latência: 1250.5ms
-  Prompt (primeiros chars): Analyze this query and determine which agents...
-  Response (primeiros chars): {"classifications": [{"source": "data_extractor",...
+`GET /logs/llm-calls`, `GET /logs/routing-decisions` and `GET /logs/stats`
+return the same information as JSON. See [API.md](API.md#get-logsllm-callslimit100).
 
-[2026-02-12T10:30:47.456789] openrouter - free
-  Agent: data_extractor
-  Status: success
-  Latência: 850.2ms
-  ...
+### Command line
 
-================================================================================
-DECISÕES DE ROTEAMENTO
-================================================================================
+```bash
+# Last routing decisions
+grep '"routing_decision"' logs/llm_calls.jsonl | tail -n 5
 
-[2026-02-12T10:30:45.123456]
-  Query: What are the financial metrics?
-  Agentes selecionados: data_extractor, sentiment_analyst
-  Total de agentes: 2
+# SQL generated for recent questions (requires jq)
+grep '"store_database"' logs/llm_calls.jsonl | jq -r '.input + "  →  " + .output' | tail -n 5
 
-================================================================================
-ESTATÍSTICAS
-================================================================================
-
-Total de chamadas LLM: 5
-Latência média: 950.34ms
-
-Chamadas por agente:
-  classifier: 1
-  data_extractor: 1
-  sentiment_analyst: 1
-  question_answerer: 1
-  synthesizer: 1
+# Failed events
+grep '"status": "error"' logs/llm_calls.jsonl | tail -n 5
 ```
 
-## Estrutura de Diretório
+---
 
-```
-logs/
-├── llm_calls.jsonl    # Logs JSON estruturados
-└── trace.log          # Logs em texto
-```
+## Debugging a wrong answer
 
-Criados automaticamente na primeira execução.
+1. **Was it routed correctly?** Check the `routing_decision`. A store data
+   question sent only to `question_answerer` (or the reverse) explains most
+   wrong answers. Fix it in the router prompt (`ROUTER_PROMPT`).
+2. **Was the sub-question right?** Check the `agent_execution` `input`. For
+   follow-ups, the router must have resolved references ("esse", "e o
+   preço?") correctly.
+3. **Was the data right?** For `store_database`, look at the SQL in
+   `output`, and run it yourself in `psql`. Wrong SQL usually means a column
+   comment in `schema.sql` is missing or unclear.
+4. **Was the policy found?** For `question_answerer`, the `output` shows the
+   answer and the sources. If it says it couldn't find the information, the
+   retrieval missed the right chunk.
+5. **Did the synthesizer change the facts?** Compare the agents' outputs
+   with the `synthesis` `final_answer`.
+
+---
+
+## Privacy
+
+The logs contain **customers' questions and the assistant's answers**,
+including order details. Keep `logs/` out of git (it already is), restrict
+access to it, and delete old logs. For production, consider logging prompt
+lengths only, not prompt text.
+
+---
+
+## Not used yet: `src/utils/tracing.py`
+
+`tracing.py` defines a `Tracer` context manager and a `@trace_llm_call`
+decorator for automatic timing, but nothing in the code uses them yet. All
+current logging goes through `StructuredLogger` directly.
