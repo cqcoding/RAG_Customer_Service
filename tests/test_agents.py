@@ -1,355 +1,357 @@
-import unittest
+"""
+Unit tests for the agents and the LLM client.
+
+Everything external is mocked (LLM, retriever, database, HTTP), so these run
+anywhere with no API key, embedding model or PostgreSQL:
+  - BaseAgent:   JSON cleanup shared by all agents
+  - qa_agent:    RAG over the store policy PDF
+  - sql_agent:   query generation, retry and refusal logic (the real
+                 database is exercised in test_sql_agent.py)
+  - OpenRouterLLM: retry on rate limits and fallback to other models
+"""
 import json
-from unittest.mock import patch, MagicMock, Mock
-from src.agents.base_agent import BaseFinancialAgent
-from src.agents.extractor_agent import extract_financial_metrics, define_context_and_sources
-from src.agents.qa_agent import question_answering_with_retrieval
-from src.agents.sentiment_agent import get_openrouter_text_sentiment, analyze_sentiment_from_query
+import unittest
+from unittest.mock import MagicMock, Mock, patch
+
+from langchain_core.documents import Document
+from requests.exceptions import HTTPError
+
+from src.agents.base_agent import BaseAgent
+from src.agents.qa_agent import question_answering_with_retrieval, run_policy_qa
+from src.agents.sql_agent import run_sql_agent
+from src.models.model_llm import OpenRouterLLM
+from src.utils.sql_database import UnsafeQueryError
+
+POLICY_PDF = "/app/data/políticas_da_loja.pdf"
 
 
-class TestBaseFinancialAgent(unittest.TestCase):
-    """Tests for BaseFinancialAgent class."""
+def llm_reply(content, model="mock-model") -> dict:
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
+    return {"content": content, "model_used": model}
 
+
+def policy_doc(text: str, page: int = 0) -> Document:
+    return Document(page_content=text, metadata={
+        "source": POLICY_PDF, "page": page, "file_type": "pdf",
+        "document": "políticas_da_loja", "doc_type": "store_policy",
+    })
+
+
+def query_result(rows: list[dict], sql: str = "SELECT 1") -> dict:
+    return {"sql": sql, "columns": list(rows[0]) if rows else [], "rows": rows, "truncated": False}
+
+
+# --------------------------------------------------------------------------
+# BaseAgent
+# --------------------------------------------------------------------------
+
+class TestBaseAgent(unittest.TestCase):
+    def test_clean_json_strips_markdown_fences(self):
+        for text in ['```json\n{"key": "value"}\n```',
+                     '```JSON\n{"key": "value"}\n```',
+                     '```\n{"key": "value"}\n```',
+                     '  {"key": "value"}  ']:
+            with self.subTest(text=text):
+                self.assertEqual(BaseAgent.clean_json(text), '{"key": "value"}')
+
+    def test_clean_json_keeps_plain_json(self):
+        plain = '{"sql": "SELECT 1", "reason": null}'
+        self.assertEqual(BaseAgent.clean_json(plain), plain)
+
+    @patch("src.agents.base_agent.get_retriever")
+    @patch("src.agents.base_agent.OpenRouterLLM")
+    def test_init_builds_llm_and_retriever(self, mock_llm_class, mock_get_retriever):
+        agent = BaseAgent(model_name="test-model")
+
+        mock_llm_class.assert_called_once_with(temperature=0, model="test-model")
+        self.assertIs(agent.retriever, mock_get_retriever.return_value)
+
+
+# --------------------------------------------------------------------------
+# Policy QA agent (RAG over the PDF)
+# --------------------------------------------------------------------------
+
+@patch("src.agents.qa_agent.OpenRouterLLM")
+@patch("src.agents.qa_agent.get_agent")
+class TestPolicyQAAgent(unittest.TestCase):
     def setUp(self):
-        """Initialize agent before each test."""
-        self.agent = BaseFinancialAgent(model_name="meta-llama/llama-2-7b")
-
-    def test_agent_initialization(self):
-        """Test agent initializes with LLM and retriever."""
-        self.assertIsNotNone(self.agent.llm)
-        self.assertIsNotNone(self.agent.retriever)
-
-    def test_clean_json_removes_markdown_triple_backticks(self):
-        """Test clean_json removes triple backticks."""
-        test_input = '```json\n{"key": "value"}\n```'
-        expected = '{"key": "value"}'
-        result = self.agent.clean_json(test_input)
-        self.assertEqual(result, expected)
-
-    def test_clean_json_removes_leading_trailing_whitespace(self):
-        """Test clean_json strips whitespace."""
-        test_input = '  \n  {"key": "value"}  \n  '
-        expected = '{"key": "value"}'
-        result = self.agent.clean_json(test_input)
-        self.assertEqual(result, expected)
-
-    def test_clean_json_handles_plain_json(self):
-        """Test clean_json doesn't modify plain JSON."""
-        plain_json = '{"name": "test", "value": 123}'
-        result = self.agent.clean_json(plain_json)
-        self.assertEqual(result, plain_json)
-
-    def test_clean_json_with_nested_structure(self):
-        """Test clean_json handles nested JSON."""
-        nested = '```\n{"outer": {"inner": "value"}}\n```'
-        expected = '{"outer": {"inner": "value"}}'
-        result = self.agent.clean_json(nested)
-        self.assertEqual(result, expected)
-
-
-class TestExtractorAgent(unittest.TestCase):
-    """Tests for extractor agent functionality."""
-
-    @patch('src.agents.extractor_agent.agent')
-    def test_define_context_and_sources(self, mock_agent):
-        """Test context and sources extraction."""
-        # Mock documents with metadata
-        mock_doc1 = Mock()
-        mock_doc1.page_content = "Revenue for Q1: $1M"
-        mock_doc1.metadata = {
-            "source": "Tesla_2023.pdf",
-            "ticker": "TSLA",
-            "document_type": "Annual Report",
-            "fiscal_year": "2023"
+        self.answer = {
+            "reasoning": "A seção de trocas informa o prazo.",
+            "final_answer": "Você pode devolver o produto em até 7 dias após o recebimento.",
+            "sources": ["políticas_da_loja.pdf"],
         }
-        
-        mock_doc2 = Mock()
-        mock_doc2.page_content = "Profit margins increased"
-        mock_doc2.metadata = {
-            "source": "Microsoft_2023.pdf",
-            "ticker": "MSFT",
-            "document_type": "Quarterly Report",
-            "fiscal_year": "2023"
-        }
-        
-        mock_agent.retriever.invoke.return_value = [mock_doc1, mock_doc2]
-        
-        context_parts, sources = define_context_and_sources("test query", mock_agent.retriever)
-        
-        self.assertEqual(len(context_parts), 2)
-        self.assertEqual(len(sources), 2)
-        self.assertIn("TSLA", sources[0]["ticker"])
-        self.assertIn("MSFT", sources[1]["ticker"])
 
-    @patch('src.agents.extractor_agent.agent')
-    def test_extract_financial_metrics_success(self, mock_agent):
-        """Test successful metric extraction."""
-        mock_doc = Mock()
-        mock_doc.page_content = "Revenue: $1000000, Profit: $200000"
-        mock_doc.metadata = {"source": "report.pdf", "ticker": "TEST", "fiscal_year": "2023"}
-        
-        mock_agent.retriever.invoke.return_value = [mock_doc]
-        mock_agent.llm.invoke.return_value = {
-            "content": '{"revenue": {"value": 1000000, "currency": "USD"}}'
-        }
-        
-        result = extract_financial_metrics("What is the revenue?")
-        
-        self.assertIsNotNone(result)
-        self.assertIn("revenue", result)
+    def test_answers_from_retrieved_policy(self, mock_get_agent, mock_llm_class):
+        mock_get_agent.return_value.retriever.invoke.return_value = [
+            policy_doc("Trocas e devoluções em até 7 dias após o recebimento.", page=2)]
+        mock_llm_class.return_value.invoke.return_value = llm_reply(self.answer)
 
-    @patch('src.agents.extractor_agent.agent')
-    def test_extract_financial_metrics_empty_retrieval(self, mock_agent):
-        """Test extraction when no documents found."""
-        mock_agent.retriever.invoke.return_value = []
-        
-        result = extract_financial_metrics("What is the revenue?")
-        
-        self.assertIsNotNone(result)
+        result = question_answering_with_retrieval("Qual o prazo para devolução?")
 
-    @patch('src.agents.extractor_agent.agent')
-    def test_extract_financial_metrics_with_null_values(self, mock_agent):
-        """Test extraction handles missing data with nulls."""
-        mock_doc = Mock()
-        mock_doc.page_content = "Partial data available"
-        mock_doc.metadata = {"source": "report.pdf"}
-        
-        mock_agent.retriever.invoke.return_value = [mock_doc]
-        mock_agent.llm.invoke.return_value = {
-            "content": '{"revenue": {"value": null, "currency": null}}'
-        }
-        
-        result = extract_financial_metrics("What is the revenue?")
-        
-        self.assertIsNotNone(result)
+        self.assertEqual(result["final_answer"], self.answer["final_answer"])
+        self.assertEqual(result["sources"], ["políticas_da_loja.pdf"])
+        self.assertEqual(result["model_used"], "mock-model")
 
+    def test_prompt_contains_context_question_and_rules(self, mock_get_agent, mock_llm_class):
+        mock_get_agent.return_value.retriever.invoke.return_value = [
+            policy_doc("Garantia de 12 meses contra defeitos de fabricação.", page=4),
+            policy_doc("Frete grátis acima de R$ 500.", page=5),
+        ]
+        mock_llm_class.return_value.invoke.return_value = llm_reply(self.answer)
 
-class TestQAAgent(unittest.TestCase):
-    """Tests for QA agent functionality."""
+        question_answering_with_retrieval("Como funciona a garantia?")
 
-    @patch('src.agents.qa_agent.agent')
-    def test_question_answering_success(self, mock_agent):
-        """Test successful question answering."""
-        mock_doc = Mock()
-        mock_doc.page_content = "Q4 revenue was $50 billion"
-        mock_doc.metadata = {
-            "source": "Annual_Report_2023.pdf",
-            "ticker": "TSLA",
-            "fiscal_year": "2023"
-        }
-        
-        mock_agent.retriever.invoke.return_value = [mock_doc]
-        mock_agent.llm.invoke.return_value = {
-            "content": json.dumps({
-                "reasoning": "Based on the document",
-                "final_answer": "Q4 revenue was $50 billion",
-                "sources": ["Annual_Report_2023.pdf"]
-            })
-        }
-        
-        result = question_answering_with_retrieval("What was Q4 revenue?")
-        
-        self.assertIn("reasoning", result)
-        self.assertIn("final_answer", result)
-        self.assertIn("sources", result)
+        prompt = mock_llm_class.return_value.invoke.call_args[0][0][0]["content"]
+        self.assertIn("Garantia de 12 meses", prompt)
+        self.assertIn("Frete grátis acima de R$ 500.", prompt)
+        self.assertIn("Document 2 (Source: " + POLICY_PDF, prompt)
+        self.assertIn("Como funciona a garantia?", prompt)
+        self.assertIn("music store", prompt)
+        self.assertIn("EXCLUSIVELY", prompt)
+        self.assertNotIn("financial", prompt.lower())
 
-    @patch('src.agents.qa_agent.agent')
-    def test_question_answering_no_documents(self, mock_agent):
-        """Test QA when no documents found."""
-        mock_agent.retriever.invoke.return_value = []
-        
-        result = question_answering_with_retrieval("What is the revenue?")
-        
-        self.assertIsInstance(result, str)
-        parsed = json.loads(result)
-        self.assertIn("No documents found", parsed["reasoning"])
+    def test_fenced_json_reply_is_parsed(self, mock_get_agent, mock_llm_class):
+        mock_get_agent.return_value.retriever.invoke.return_value = [policy_doc("Pix, boleto e cartão.")]
+        mock_llm_class.return_value.invoke.return_value = llm_reply(
+            "```json\n" + json.dumps(self.answer, ensure_ascii=False) + "\n```")
 
-    @patch('src.agents.qa_agent.agent')
-    def test_question_answering_multiple_sources(self, mock_agent):
-        """Test QA with multiple source documents."""
-        mock_docs = []
-        for i in range(3):
-            doc = Mock()
-            doc.page_content = f"Content {i}"
-            doc.metadata = {
-                "source": f"Report_{i}.pdf",
-                "ticker": "TEST",
-                "fiscal_year": "2023"
-            }
-            mock_docs.append(doc)
-        
-        mock_agent.retriever.invoke.return_value = mock_docs
-        mock_agent.llm.invoke.return_value = {
-            "content": json.dumps({
-                "reasoning": "Comparing all sources",
-                "final_answer": "Consolidated answer",
-                "sources": ["Report_0.pdf", "Report_1.pdf", "Report_2.pdf"]
-            })
-        }
-        
-        result = question_answering_with_retrieval("Compare sources")
-        
-        parsed = json.loads(result)
-        self.assertEqual(len(parsed["sources"]), 3)
+        result = question_answering_with_retrieval("Quais as formas de pagamento?")
+
+        self.assertEqual(result["reasoning"], self.answer["reasoning"])
+
+    def test_no_documents_skips_the_llm(self, mock_get_agent, mock_llm_class):
+        mock_get_agent.return_value.retriever.invoke.return_value = []
+
+        result = question_answering_with_retrieval("Vocês vendem carros?")
+
+        self.assertIsInstance(result, dict)
+        self.assertIn("No relevant documents", result["reasoning"])
+        self.assertEqual(result["sources"], [])
+        mock_llm_class.return_value.invoke.assert_not_called()
+
+    def test_run_policy_qa_success_shape(self, mock_get_agent, mock_llm_class):
+        mock_get_agent.return_value.retriever.invoke.return_value = [policy_doc("7 dias.")]
+        mock_llm_class.return_value.invoke.return_value = llm_reply(self.answer)
+
+        result = run_policy_qa("Qual o prazo para devolução?")
+
+        self.assertEqual(result, {
+            "query": "Qual o prazo para devolução?",
+            "reasoning": self.answer["reasoning"],
+            "final_answer": self.answer["final_answer"],
+            "sources": self.answer["sources"],
+            "status": "success",
+        })
+
+    def test_run_policy_qa_invalid_json(self, mock_get_agent, mock_llm_class):
+        mock_get_agent.return_value.retriever.invoke.return_value = [policy_doc("7 dias.")]
+        mock_llm_class.return_value.invoke.return_value = llm_reply("Desculpe, não sei responder.")
+
+        result = run_policy_qa("Qual o prazo?")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Failed to parse JSON", result["error"])
+
+    def test_run_policy_qa_retriever_failure(self, mock_get_agent, mock_llm_class):
+        mock_get_agent.return_value.retriever.invoke.side_effect = Exception("Chroma unavailable")
+
+        result = run_policy_qa("Qual o prazo?")
+
+        self.assertEqual(result, {"query": "Qual o prazo?", "error": "Chroma unavailable", "status": "error"})
+
+    def test_run_policy_qa_llm_failure(self, mock_get_agent, mock_llm_class):
+        mock_get_agent.return_value.retriever.invoke.return_value = [policy_doc("7 dias.")]
+        mock_llm_class.return_value.invoke.side_effect = Exception("Todos os modelos falharam")
+
+        result = run_policy_qa("Qual o prazo?")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Todos os modelos falharam", result["error"])
 
 
-class TestSentimentAgent(unittest.TestCase):
-    """Tests for sentiment analysis agent."""
+# --------------------------------------------------------------------------
+# SQL agent (store data), with the database mocked
+# --------------------------------------------------------------------------
 
-    @patch('src.agents.sentiment_agent.agent')
-    def test_sentiment_analysis_bullish(self, mock_agent):
-        """Test sentiment analysis identifying bullish sentiment."""
-        mock_agent.llm.invoke.return_value = {
-            "content": json.dumps({
-                "sentiment": "bullish",
-                "risks": [],
-                "red_flags": [],
-                "comparison_to_previous": "positive"
-            }),
-            "model_used": "llama-2"
-        }
-        
-        result = get_openrouter_text_sentiment("Strong revenue growth and market expansion")
-        
-        self.assertEqual(result["sentiment"], "bullish")
-        self.assertIsInstance(result["risks"], list)
-        self.assertIsInstance(result["red_flags"], list)
+@patch("src.agents.sql_agent.get_schema_description",
+       return_value="TABLE products\n  price_brl numeric(10,2)\nTABLE orders\n  status text")
+@patch("src.agents.sql_agent.run_readonly_query")
+@patch("src.agents.sql_agent.llm")
+class TestSqlAgent(unittest.TestCase):
+    def test_success_returns_rows_and_sql(self, mock_llm, mock_query, _schema):
+        sql = "SELECT name, price_brl FROM products WHERE name ILIKE '%Yamaha C40%'"
+        mock_llm.invoke.return_value = llm_reply({"sql": sql})
+        mock_query.return_value = query_result(
+            [{"name": "Yamaha C40 Nylon Natural", "price_brl": 599.9}], sql)
 
-    @patch('src.agents.sentiment_agent.agent')
-    def test_sentiment_analysis_bearish(self, mock_agent):
-        """Test sentiment analysis identifying bearish sentiment."""
-        mock_agent.llm.invoke.return_value = {
-            "content": json.dumps({
-                "sentiment": "bearish",
-                "risks": ["market_volatility", "supply_chain"],
-                "red_flags": ["declining_margins"],
-                "comparison_to_previous": None
-            }),
-            "model_used": "llama-2"
-        }
-        
-        result = get_openrouter_text_sentiment("Declining profits and market challenges")
-        
-        self.assertEqual(result["sentiment"], "bearish")
-        self.assertEqual(len(result["risks"]), 2)
-        self.assertEqual(len(result["red_flags"]), 1)
+        result = run_sql_agent("Quanto custa o Yamaha C40?")
 
-    @patch('src.agents.sentiment_agent.agent')
-    def test_sentiment_analysis_neutral(self, mock_agent):
-        """Test sentiment analysis identifying neutral sentiment."""
-        mock_agent.llm.invoke.return_value = {
-            "content": json.dumps({
-                "sentiment": "neutral",
-                "risks": [],
-                "red_flags": [],
-                "comparison_to_previous": None
-            }),
-            "model_used": "llama-2"
-        }
-        
-        result = get_openrouter_text_sentiment("Steady performance with no major changes")
-        
-        self.assertEqual(result["sentiment"], "neutral")
+        mock_query.assert_called_once_with(sql)
+        self.assertEqual(result, {
+            "query": "Quanto custa o Yamaha C40?",
+            "status": "success",
+            "sql": sql,
+            "row_count": 1,
+            "truncated": False,
+            "rows": [{"name": "Yamaha C40 Nylon Natural", "price_brl": 599.9}],
+        })
 
-    @patch('src.agents.sentiment_agent.agent')
-    def test_sentiment_analysis_json_error(self, mock_agent):
-        """Test sentiment analysis handles JSON parsing errors."""
-        mock_agent.llm.invoke.return_value = {
-            "content": "Invalid JSON response"
-        }
-        mock_agent.clean_json.return_value = "Invalid JSON response"
-        
-        result = get_openrouter_text_sentiment("Some text")
-        
-        self.assertEqual(result["sentiment"], "error")
-        self.assertIn("error_message", result)
+    def test_prompt_has_schema_and_store_rules(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.return_value = llm_reply({"sql": "SELECT 1"})
+        mock_query.return_value = query_result([{"?column?": 1}])
 
-    @patch('src.agents.sentiment_agent.agent')
-    def test_analyze_sentiment_from_query(self, mock_agent):
-        """Test full sentiment analysis from query."""
-        mock_doc = Mock()
-        mock_doc.page_content = "Strong financial performance"
-        mock_doc.metadata = {"source": "report.pdf"}
-        
-        mock_agent.retriever.invoke.return_value = [mock_doc]
-        mock_agent.llm.invoke.return_value = {
-            "content": json.dumps({
-                "sentiment": "bullish",
-                "risks": [],
-                "red_flags": []
-            })
-        }
-        
-        result = analyze_sentiment_from_query("What is the sentiment?")
-        
-        self.assertIsNotNone(result)
+        run_sql_agent("Quais produtos estão em promoção?")
+
+        system, user = mock_llm.invoke.call_args[0][0][:2]
+        self.assertIn("TABLE products", system["content"])
+        self.assertIn("LIMIT 50", system["content"])
+        for rule in ["ILIKE", "is_active", "discontinued", "CURRENT_DATE", "PRIVACY"]:
+            self.assertIn(rule, system["content"])
+        self.assertEqual(user, {"role": "user", "content": "Quais produtos estão em promoção?"})
+
+    def test_fenced_json_reply_is_parsed(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.return_value = llm_reply('```json\n{"sql": "SELECT count(*) FROM products"}\n```')
+        mock_query.return_value = query_result([{"count": 65}])
+
+        self.assertEqual(run_sql_agent("Quantos produtos?")["rows"], [{"count": 65}])
+
+    def test_refusal_does_not_touch_the_database(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.return_value = llm_reply(
+            {"sql": None, "reason": "Would expose customers' personal data."})
+
+        result = run_sql_agent("Liste o e-mail de todos os clientes")
+
+        self.assertEqual(result["status"], "not_answerable")
+        self.assertIn("personal data", result["reason"])
+        mock_query.assert_not_called()
+
+    def test_database_error_is_retried_once_with_the_error(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.side_effect = [
+            llm_reply({"sql": "SELECT price FROM products"}),
+            llm_reply({"sql": "SELECT price_brl FROM products"}),
+        ]
+        mock_query.side_effect = [Exception('column "price" does not exist'),
+                                  query_result([{"price_brl": 599.9}])]
+
+        result = run_sql_agent("Quanto custa?")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(mock_llm.invoke.call_count, 2)
+        retry_messages = mock_llm.invoke.call_args_list[1][0][0]
+        self.assertEqual(retry_messages[2]["role"], "assistant")  # the failed attempt
+        self.assertIn('column "price" does not exist', retry_messages[3]["content"])
+
+    def test_second_failure_is_reported(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.return_value = llm_reply({"sql": "SELECT nope FROM products"})
+        mock_query.side_effect = Exception('column "nope" does not exist')
+
+        result = run_sql_agent("?")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn('column "nope" does not exist', result["error"])
+        self.assertEqual(mock_llm.invoke.call_count, 2)
+
+    def test_unsafe_sql_is_not_retried(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.return_value = llm_reply({"sql": "DELETE FROM orders"})
+        mock_query.side_effect = UnsafeQueryError("Only SELECT queries are allowed.")
+
+        result = run_sql_agent("apague os pedidos")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("UnsafeQueryError", result["error"])
+        self.assertEqual(mock_llm.invoke.call_count, 1)
+
+    def test_invalid_llm_output_is_an_error(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.return_value = llm_reply("Claro! Aqui está a consulta: SELECT 1")
+
+        result = run_sql_agent("?")
+
+        self.assertEqual(result["status"], "error")
+        mock_query.assert_not_called()
+
+    def test_llm_unavailable_is_an_error(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.side_effect = Exception("Todos os modelos falharam")
+
+        result = run_sql_agent("?")
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Todos os modelos falharam", result["error"])
 
 
-class TestErrorHandling(unittest.TestCase):
-    """Tests for error handling across agents."""
+# --------------------------------------------------------------------------
+# OpenRouterLLM client: retries and model fallback
+# --------------------------------------------------------------------------
 
-    @patch('src.agents.base_agent.OpenRouterLLM')
-    def test_agent_handles_llm_failure(self, mock_llm_class):
-        """Test agent handles LLM call failure."""
-        mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("LLM unavailable")
-        mock_llm_class.return_value = mock_llm
-        
-        agent = BaseFinancialAgent(model_name="test-model")
-        
+def http_response(status: int, payload=None, text=None) -> Mock:
+    response = Mock(status_code=status)
+    response.text = text if text is not None else json.dumps(payload or {})
+    response.json.return_value = payload or {}
+    if status >= 400:
+        response.raise_for_status.side_effect = HTTPError(response=response)
+    else:
+        response.raise_for_status.return_value = None
+    return response
+
+
+def completion(content: str, model: str) -> dict:
+    return {"model": model, "choices": [{"message": {"content": content}}]}
+
+
+@patch("src.models.model_llm.time.sleep")
+@patch("src.models.model_llm.requests.post")
+class TestOpenRouterLLM(unittest.TestCase):
+    def test_returns_content_and_model(self, mock_post, _sleep):
+        mock_post.return_value = http_response(200, completion("Olá!", "model-a"))
+
+        result = OpenRouterLLM(model="model-a").invoke([{"role": "user", "content": "oi"}])
+
+        self.assertEqual(result, {"content": "Olá!", "model_used": "model-a"})
+        body = mock_post.call_args.kwargs["json"]
+        self.assertEqual(body["model"], "model-a")
+        self.assertEqual(body["temperature"], 0)
+
+    def test_rate_limit_is_retried_with_backoff(self, mock_post, mock_sleep):
+        mock_post.side_effect = [http_response(429), http_response(429),
+                                 http_response(200, completion("ok", "model-a"))]
+
+        result = OpenRouterLLM(model="model-a").invoke([])
+
+        self.assertEqual(result["content"], "ok")
+        self.assertEqual([c.args[0] for c in mock_sleep.call_args_list], [2, 4])
+
+    def test_falls_back_to_next_model_on_server_error(self, mock_post, _sleep):
+        mock_post.side_effect = [http_response(500, text="internal error"),
+                                 http_response(200, completion("ok", OpenRouterLLM.FALLBACK_MODELS[0]))]
+
+        result = OpenRouterLLM(model="model-a").invoke([])
+
+        self.assertEqual(result["model_used"], OpenRouterLLM.FALLBACK_MODELS[0])
+        self.assertEqual([c.kwargs["json"]["model"] for c in mock_post.call_args_list],
+                         ["model-a", OpenRouterLLM.FALLBACK_MODELS[0]])
+
+    def test_empty_response_falls_back(self, mock_post, _sleep):
+        mock_post.side_effect = [http_response(200, text=""),
+                                 http_response(200, completion("ok", "fallback"))]
+
+        self.assertEqual(OpenRouterLLM(model="model-a").invoke([])["content"], "ok")
+
+    def test_raises_when_every_model_fails(self, mock_post, _sleep):
+        mock_post.return_value = http_response(500, text="down")
+
+        with self.assertRaises(Exception) as ctx:
+            OpenRouterLLM(model="model-a").invoke([])
+
+        self.assertIn("Todos os modelos falharam", str(ctx.exception))
+        self.assertEqual(mock_post.call_count, 1 + len(OpenRouterLLM.FALLBACK_MODELS))
+
+    def test_fallback_can_be_disabled(self, mock_post, _sleep):
+        mock_post.return_value = http_response(500, text="down")
+
         with self.assertRaises(Exception):
-            agent.llm.invoke([])
+            OpenRouterLLM(model="model-a", enable_fallback=False).invoke([])
 
-    @patch('src.agents.base_agent.get_retriever')
-    def test_agent_handles_retriever_failure(self, mock_get_retriever):
-        """Test agent handles retriever failure."""
-        mock_retriever = MagicMock()
-        mock_retriever.invoke.side_effect = Exception("Database error")
-        mock_get_retriever.return_value = mock_retriever
-        
-        agent = BaseFinancialAgent(model_name="test-model")
-        
-        with self.assertRaises(Exception):
-            agent.retriever.invoke("query")
-
-
-class TestDataStructures(unittest.TestCase):
-    """Tests for data structure validation."""
-
-    def test_sentiment_result_structure(self):
-        """Test sentiment result has expected structure."""
-        sentiment_result = {
-            "sentiment": "bullish",
-            "risks": ["risk1"],
-            "red_flags": [],
-            "comparison": None,
-            "model_used": "llama-2"
-        }
-        
-        required_keys = {"sentiment", "risks", "red_flags"}
-        self.assertTrue(required_keys.issubset(set(sentiment_result.keys())))
-
-    def test_extraction_result_structure(self):
-        """Test extraction result has expected structure."""
-        extraction_result = {
-            "revenue": {"value": 1000000, "currency": "USD"},
-            "profit": {"value": 200000, "currency": "USD"}
-        }
-        
-        for metric in extraction_result.values():
-            self.assertIn("value", metric)
-            self.assertIn("currency", metric)
-
-    def test_qa_result_structure(self):
-        """Test QA result has expected structure."""
-        qa_result = {
-            "reasoning": "Step-by-step analysis",
-            "final_answer": "The answer is X",
-            "sources": ["source1", "source2"]
-        }
-        
-        required_keys = {"reasoning", "final_answer", "sources"}
-        self.assertEqual(set(qa_result.keys()), required_keys)
+        self.assertEqual(mock_post.call_count, 1)
 
 
 if __name__ == "__main__":
