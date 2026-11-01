@@ -1,0 +1,9 @@
+# Linter settings, used locally (`make lint`) and in CI.
+target-version = "py312"
+line-length = 120
+
+[lint]
+# F: pyflakes (unused imports/variables, undefined names)
+# E9: syntax errors
+# B: bugbear (likely bugs, e.g. `raise` without `from` inside `except`)
+select = ["F", "E9", "B"]

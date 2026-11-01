@@ -1,5 +1,7 @@
 # RAG Customer Service
 
+[![CI](https://github.com/cqcoding/RAG_Customer_Service/actions/workflows/ci.yml/badge.svg)](https://github.com/cqcoding/RAG_Customer_Service/actions/workflows/ci.yml)
+
 A customer service assistant for **Empório da Música**, a Brazilian musical
 instrument store in Campo Grande (shown in the chat as "Music Emporium Store").
 Customers ask questions in natural language, in Portuguese or English, and the
@@ -37,14 +39,16 @@ like *"e tem desconto?"* work.
 - **Conversation memory**: follow-ups are rewritten into standalone questions.
 - **Safe SQL generation**: one `SELECT` only, run by a read-only database role,
   on a read-only connection, with a timeout and a row cap.
-- **Privacy rules**: customers' personal data (name, phone, e-mail) is never
-  returned, and customers or orders can't be listed in bulk.
+- **Privacy by design**: the database role the agent uses can't read
+  customers' names, phones or e-mails at all (column-level grants), and the
+  prompt forbids listing customers or orders in bulk.
 - **Resilient LLM access** through OpenRouter: retries on rate limits and
   automatic fallback across five models.
 - **Two interfaces**: a Streamlit chat and a FastAPI REST API.
 - **Structured logging** of every routing decision, agent run and LLM call.
 - **Tests at three levels**: mocked unit tests, tests against a real
-  PostgreSQL, and opt-in behavior tests against the real LLM.
+  PostgreSQL, and opt-in behavior tests against the real LLM. Lint and tests
+  run automatically on GitHub Actions for every pull request.
 - **One-command Docker setup** that loads the data and starts everything.
 
 ---
@@ -87,8 +91,9 @@ If port 5432 is already used by another PostgreSQL on your machine, set
 ### Running the tests
 
 ```bash
-pytest                                              # unit + database tests
+pytest                                              # unit, API and database tests
 RUN_LLM_TESTS=1 pytest tests/test_llm_behavior.py -v   # real-LLM behavior tests (costs API calls)
+ruff check                                          # lint (or: make lint)
 ```
 
 See [docs/TESTS.md](docs/TESTS.md).
@@ -118,9 +123,11 @@ See [docs/TESTS.md](docs/TESTS.md).
 │       ├── retriever.py          Chroma retriever (MMR)
 │       ├── logger.py             Structured JSON logging
 │       └── view_logs.py          Interactive log viewer
-├── tests/                        Unit, database and LLM behavior tests
+├── tests/                        Unit, API, database and LLM behavior tests
+├── .github/workflows/ci.yml      CI: lint + tests on every push to main and every pull request
 ├── Dockerfile, docker-compose.yml
-├── Makefile                      Shortcuts: setup, db-up, load-db, docker-up, test, …
+├── Makefile                      Shortcuts: setup, db-up, load-db, docker-up, test, lint, …
+├── ruff.toml                     Linter settings
 └── .env.example                  All settings, with defaults
 ```
 

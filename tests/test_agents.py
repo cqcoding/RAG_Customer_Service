@@ -11,7 +11,7 @@ anywhere with no API key, embedding model or PostgreSQL:
 """
 import json
 import unittest
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 from langchain_core.documents import Document
 from requests.exceptions import HTTPError
@@ -19,7 +19,7 @@ from requests.exceptions import HTTPError
 from src.agents.base_agent import BaseAgent
 from src.agents.qa_agent import question_answering_with_retrieval, run_policy_qa
 from src.agents.sql_agent import run_sql_agent
-from src.models.model_llm import OpenRouterLLM
+from src.models.model_llm import LLMUnavailableError, OpenRouterLLM
 from src.utils.sql_database import UnsafeQueryError
 
 POLICY_PDF = "/app/data/políticas_da_loja.pdf"
@@ -339,7 +339,7 @@ class TestOpenRouterLLM(unittest.TestCase):
     def test_raises_when_every_model_fails(self, mock_post, _sleep):
         mock_post.return_value = http_response(500, text="down")
 
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(LLMUnavailableError) as ctx:
             OpenRouterLLM(model="model-a").invoke([])
 
         self.assertIn("Todos os modelos falharam", str(ctx.exception))
@@ -348,7 +348,7 @@ class TestOpenRouterLLM(unittest.TestCase):
     def test_fallback_can_be_disabled(self, mock_post, _sleep):
         mock_post.return_value = http_response(500, text="down")
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(LLMUnavailableError):
             OpenRouterLLM(model="model-a", enable_fallback=False).invoke([])
 
         self.assertEqual(mock_post.call_count, 1)

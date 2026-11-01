@@ -20,6 +20,10 @@ CSV_PREFIX = "desafio_tecnico_ai_eng - "
 # Parents before children, so foreign keys resolve.
 TABLES = ["categories", "customers", "products", "orders", "order_items", "promotions"]
 
+# The only customers columns the SQL agent's role may read. Names, phones and
+# e-mails are not granted, so no prompt injection can make the agent return them.
+READER_CUSTOMER_COLUMNS = ("customer_id", "city")
+
 
 def read_table(table: str) -> pd.DataFrame:
     df = pd.read_csv(DATA_PATH / f"{CSV_PREFIX}{table}.csv", encoding="utf-8")
@@ -30,13 +34,17 @@ def read_table(table: str) -> pd.DataFrame:
 
 
 def setup_reader_role(conn: psycopg.Connection, user: str, password: str) -> None:
-    """Create/refresh the read-only role and grant SELECT on every table."""
+    """Create/refresh the read-only role: SELECT on every table, except the
+    customers' personal data columns."""
     exists = conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (user,)).fetchone()
     action = "ALTER" if exists else "CREATE"
     conn.execute(sql.SQL("{} ROLE {} LOGIN PASSWORD {}").format(
         sql.SQL(action), sql.Identifier(user), sql.Literal(password)))
     conn.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(user)))
     conn.execute(sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA public TO {}").format(sql.Identifier(user)))
+    conn.execute(sql.SQL("REVOKE SELECT ON customers FROM {}").format(sql.Identifier(user)))
+    conn.execute(sql.SQL("GRANT SELECT ({}) ON customers TO {}").format(
+        sql.SQL(", ").join(map(sql.Identifier, READER_CUSTOMER_COLUMNS)), sql.Identifier(user)))
 
 
 def create_sql_db() -> None:

@@ -6,6 +6,11 @@ from src.config import get_settings
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+
+class LLMUnavailableError(Exception):
+    """Raised when every model in the fallback chain failed."""
+
+
 class OpenRouterLLM:
     DEFAULT_MODEL = "google/gemini-3-flash-preview"
     FALLBACK_MODELS = [
@@ -93,4 +98,4 @@ class OpenRouterLLM:
                     print(f"Erro inesperado com {model}: {type(e).__name__}: {e}")
                     break
         
-        raise Exception(f"Todos os modelos falharam após {len(models_to_try)} tentativas: {models_to_try}")
+        raise LLMUnavailableError(f"Todos os modelos falharam após {len(models_to_try)} tentativas: {models_to_try}")

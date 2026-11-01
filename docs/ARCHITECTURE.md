@@ -54,7 +54,7 @@ merges their answers.
 | API | **FastAPI** + **Uvicorn** | Typed request/response models and automatic Swagger docs |
 | Settings | **pydantic-settings** + `.env` | One typed `Settings` class, overridable by environment variables |
 | Packaging | **Docker** + **Docker Compose** | One command starts PostgreSQL, loads data and runs the app |
-| Tests | **pytest** / `unittest.mock` | Three levels: mocked, real database, real LLM |
+| Tests and CI | **pytest** / `unittest.mock`, **ruff**, **GitHub Actions** | Three levels (mocked, real database, real LLM); lint and tests run on every pull request |
 
 ---
 
@@ -331,7 +331,8 @@ Rules in the prompt:
    `LIMIT 50` unless the result is an aggregate.
 8. **Privacy**: orders only by their `order_id` or `tracking_code`; never
    select customers' personal data; never list, count or search customers or
-   orders in bulk.
+   orders in bulk. (Personal data is also impossible to read at the database
+   level, see 7.5; this rule mainly prevents bulk listing.)
 
 ### 7.5 Safety layers for LLM-written SQL
 
@@ -342,13 +343,15 @@ malicious (for example, after prompt injection), and limits what it can do:
 |---|---|---|
 | Statement check | Only a single statement starting with `SELECT` or `WITH`; rejects `;`-separated statements | `validate_select()` |
 | Read-only role | Connects as `store_reader`, which only has `SELECT` grants | `create_sql_db.setup_reader_role()` |
+| Column-level grants | On `customers`, the role can only read `customer_id` and `city`: selecting `name`, `phone`, `email` (or `*`) fails with *permission denied*, whatever the prompt says. The schema description shown to the agent omits those columns, so it doesn't try | `READER_CUSTOMER_COLUMNS`, `_SCHEMA_QUERY` |
 | Read-only connection | The transaction is read-only, so PostgreSQL rejects writes hidden in a `WITH` or a function like `query_to_xml` | `_connect_reader()` |
 | Statement timeout | Each query is cancelled after 5 seconds | `STATEMENT_TIMEOUT_MS` |
 | Row cap | At most 50 rows are returned, with a `truncated` flag | `MAX_ROWS` |
 
 The first layer is a convenience; the real protection is in PostgreSQL itself
-(layers 2 to 4), which can't be talked out of its permissions. The tests try
-writes that get past the first layer and check that the database refuses them.
+(layers 2 to 5), which can't be talked out of its permissions. The tests try
+writes that get past the first layer, and reads of personal data, and check
+that the database refuses them.
 
 Only the loader uses the owner account (`DATABASE_URL`); the agent never
 connects with it.
@@ -414,7 +417,7 @@ For each model, up to **3 attempts**:
 - **Any other HTTP error, an empty response, or invalid JSON**: move to the
   next model immediately.
 
-If every model fails, the client raises an error. The agents and the
+If every model fails, the client raises `LLMUnavailableError`. The agents and the
 orchestrator turn that into an error result and, at the end, a polite
 fallback message, so the user never sees a stack trace. With
 `enable_fallback=False`, only the given model is tried.
@@ -433,6 +436,12 @@ orchestrator directly (it doesn't go through the API), so it runs on its own.
 
 `POST /query` (with optional `history`), `GET /health`, and three log
 endpoints. Full reference: [API.md](API.md).
+
+The endpoints that do blocking work (`/query`, the log endpoints) are plain
+`def` functions, not `async def`: FastAPI runs them in a thread pool, so
+several questions are answered at the same time. An `async def` endpoint that
+calls blocking code would stall the server's event loop, and the API would
+answer one request at a time (a bug found in review, now covered by a test).
 
 ---
 
@@ -483,8 +492,9 @@ A version with real customer isolation was built: PostgreSQL **row-level
 security** on `customers`, `orders` and `order_items`, keyed on a customer id
 fixed when the connection opens, with identification by e-mail plus order
 number. It was removed on purpose, because authentication is out of scope for
-this stage. Privacy now relies on the prompt rules and the read-only role
-(see [limitations](#13-known-limitations-and-next-steps)). The design is
+this stage. Privacy now relies on column-level grants (personal data can't be
+read at all), the read-only role and the prompt rules (see
+[limitations](#13-known-limitations-and-next-steps)). The design is
 recorded here so it can be brought back.
 
 ### 12.3 Other changes
@@ -502,6 +512,10 @@ recorded here so it can be brought back.
 | Vector store rebuilt instead of appended | Re-running the build duplicated every chunk |
 | Docker: complete requirements, NLTK data in the image, model cache, `init` service | The image was missing packages, and the stack needed manual steps |
 | Upload endpoint and HTML/TXT ingestion removed | Not needed for this project |
+| `/query` changed from `async def` to `def` | The blocking workflow inside an `async` endpoint made the API answer one request at a time |
+| Column-level grants on `customers` | Personal data protected by the database, not only by the prompt |
+| Unused dependencies removed, every version pinned | Leftovers from the base project; reproducible installs in Docker and CI |
+| `ruff`, GitHub Actions CI, API tests; unused `tracing.py` removed | Automated proof that `main` works; less dead code |
 
 ---
 
@@ -509,12 +523,11 @@ recorded here so it can be brought back.
 
 | Limitation | Impact | Possible next step |
 |---|---|---|
-| **No authentication** | Anyone who knows or guesses an order number can see that order's status, items and tracking code. Personal data is protected only by prompt rules. | Re-enable the row-level security design from [12.2](#122-customer-authentication-built-then-deliberately-removed), or use column-level grants so the reader role can't select `name`, `phone`, `email` at all |
+| **No authentication** | Anyone who knows or guesses an order number can see that order's status, items and tracking code (personal data is safe: the database role can't read it) | Re-enable the row-level security design from [12.2](#122-customer-authentication-built-then-deliberately-removed), plus authentication and rate limiting on the API |
 | **English embedding model** on Portuguese text | Weaker policy retrieval than possible | Switch `EMBEDDING_MODEL` to a multilingual FastEmbed model such as `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` or `intfloat/multilingual-e5-large`, rebuild Chroma, and compare answers |
 | **LLM non-determinism** | Even at temperature 0, wording and occasionally behavior vary | Keep the real-LLM behavior tests and run them after every prompt or model change |
 | **Latency** | 3 to 4 sequential LLM calls per question | Stream the final answer; skip the synthesizer when a single agent's output is already a good answer |
 | **Logs contain customers' questions** | Privacy | Rotate and restrict access; avoid logging full prompts in production |
-| **Unused tracing helpers** | `src/utils/tracing.py` (`Tracer`, `@trace_llm_call`) isn't wired in | Use it or remove it |
 | **Cached schema description** | Schema changes need an app restart | Acceptable for a static schema |
 
 ---

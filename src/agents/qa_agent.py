@@ -1,6 +1,5 @@
 from src.models.model_llm import OpenRouterLLM
 from src.agents.base_agent import BaseAgent
-from langchain_core.prompts import PromptTemplate
 import json
 
 from functools import lru_cache

@@ -91,6 +91,29 @@ class TestReadOnlyDatabase(unittest.TestCase):
         self.assertEqual(rows("SELECT current_user AS u"),
                          [{"u": get_settings().database_reader_user}])
 
+    def test_customers_personal_data_is_not_readable(self):
+        # Enforced by column-level grants, whatever SQL the model writes.
+        for sql in ["SELECT email FROM customers",
+                    "SELECT name, phone FROM customers WHERE customer_id = 1",
+                    "SELECT * FROM customers",
+                    "SELECT c.email FROM orders o JOIN customers c USING (customer_id) WHERE o.order_id = 8"]:
+            with self.subTest(sql=sql), self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                run_readonly_query(sql)
+
+    def test_customers_non_personal_columns_are_readable(self):
+        self.assertEqual(rows("SELECT customer_id, city FROM customers WHERE customer_id = 1"),
+                         [{"customer_id": 1, "city": "Campo Grande"}])
+        self.assertEqual(rows("SELECT o.order_id FROM orders o JOIN customers c USING (customer_id) "
+                              "WHERE c.customer_id = 2"), [{"order_id": 8}])
+
+    def test_schema_description_hides_personal_data(self):
+        schema = get_schema_description()
+        customers = schema[schema.index("TABLE customers"):schema.index("TABLE order_items")]
+        self.assertIn("customer_id", customers)
+        self.assertIn("city", customers)
+        for column in ["  name ", "  phone ", "  email "]:
+            self.assertNotIn(column, customers)
+
     def test_rows_are_capped(self):
         result = run_readonly_query("SELECT product_id FROM products", max_rows=10)
         self.assertEqual(len(result["rows"]), 10)

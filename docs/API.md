@@ -248,6 +248,8 @@ three folders:
 - **No authentication.** The API is meant to run behind another service or
   on a private network. Don't expose it publicly as is: anyone could spend
   your OpenRouter credits and look up orders by number.
+- **Concurrency.** Requests are answered in parallel: the endpoints doing
+  blocking work are sync functions, which FastAPI runs in a thread pool.
 - **CORS** isn't configured. A browser front-end on another origin would
   need FastAPI's `CORSMiddleware`.
 - **Docker vs. local logs.** In Docker, the API reads the logs in the

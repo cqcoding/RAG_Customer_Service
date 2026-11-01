@@ -1,0 +1,74 @@
+# Continuous integration: GitHub runs this on every push to main and on every
+# pull request. Results appear in the repository's "Actions" tab and as a
+# check (✓ or ✗) on each pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Same ruff version as requirements.txt, without installing everything else.
+      - name: Install ruff
+        run: pip install "$(grep '^ruff==' requirements.txt)"
+
+      - name: Run ruff
+        run: ruff check
+
+  test:
+    name: Tests (pytest + PostgreSQL)
+    runs-on: ubuntu-latest
+
+    # A throwaway PostgreSQL for the database tests, like docker-compose's.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rag
+          POSTGRES_PASSWORD: rag
+          POSTGRES_DB: store
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rag -d store"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://rag:rag@localhost:5432/store
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip    # reuses downloaded packages between runs
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load the store data into PostgreSQL
+        run: python -m src.utils.create_sql_db
+
+      # The database tests skip when PostgreSQL is unreachable. In CI that
+      # would hide a broken setup behind a green check, so fail loudly instead.
+      - name: Check the read-only role can query the data
+        run: python -c "from src.utils.sql_database import run_readonly_query as q; print(q('SELECT count(*) AS products FROM products')['rows'])"
+
+      # The real-LLM tests (tests/test_llm_behavior.py) skip themselves: they
+      # need RUN_LLM_TESTS=1 and an API key, and cost money.
+      - name: Run tests
+        run: pytest -v -rs

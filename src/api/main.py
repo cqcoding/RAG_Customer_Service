@@ -33,12 +33,6 @@ class QueryResponse(BaseModel):
     latency_ms: float
     status: str
 
-class LogEntry(BaseModel):
-    timestamp: str
-    event_type: str
-    agent: str
-    latency_ms: float
-
 class StatsResponse(BaseModel):
     total_llm_calls: int
     avg_latency_ms: float
@@ -55,8 +49,11 @@ async def health_check():
         "version": "1.0.0"
     }
 
+# Plain `def` (not `async def`): the workflow blocks on LLM HTTP calls, and
+# FastAPI runs sync endpoints in a thread pool, so requests don't wait for
+# each other.
 @app.post("/query", response_model=QueryResponse)
-async def query_endpoint(request: QueryRequest):
+def query_endpoint(request: QueryRequest):
     """
     Executa uma query no sistema RAG.
     
@@ -111,11 +108,11 @@ async def query_endpoint(request: QueryRequest):
         raise HTTPException(
             status_code=500,
             detail=f"{type(e).__name__}: {str(e)}"
-        )
+        ) from e
 
 
 @app.get("/logs/llm-calls")
-async def get_llm_logs(limit: int = 100):
+def get_llm_logs(limit: int = 100):
     """
     Retorna logs das últimas chamadas LLM.
     
@@ -142,7 +139,7 @@ async def get_llm_logs(limit: int = 100):
     }
 
 @app.get("/logs/stats", response_model=StatsResponse)
-async def get_stats():
+def get_stats():
     """
     Retorna estatísticas agregadas dos logs.
     """
@@ -180,7 +177,7 @@ async def get_stats():
     )
 
 @app.get("/logs/routing-decisions")
-async def get_routing_logs(limit: int = 50):
+def get_routing_logs(limit: int = 50):
     """
     Retorna últimas decisões de roteamento.
     
