@@ -1,12 +1,12 @@
 """
-Unit tests for the orchestrator: routing, conversation memory and synthesis. All LLM calls and agents are mocked,
-so these need no network, model download or database.
+Unit tests for the orchestrator: routing, conversation memory and synthesis.
+All LLM calls and agents are mocked, so these need no network, model download
+or database. The agents themselves are tested in test_agents.py.
 """
 import json
 import unittest
 from unittest.mock import patch
 
-from src.agents.base_agent import BaseAgent
 from src.agents.orchestrator import (
     FALLBACK_ANSWER,
     answer,
@@ -24,14 +24,6 @@ def reply(content) -> dict:
 
 def route(*pairs) -> dict:
     return {"classifications": [{"source": s, "query": q} for s, q in pairs]}
-
-
-class TestCleanJson(unittest.TestCase):
-    def test_strips_markdown_fences(self):
-        for text in ["```json\n{\"key\": \"value\"}\n```", "```\n{\"key\": \"value\"}\n```",
-                     "  {\"key\": \"value\"}  "]:
-            with self.subTest(text=text):
-                self.assertEqual(BaseAgent.clean_json(text), '{"key": "value"}')
 
 
 @patch("src.agents.orchestrator.logger")

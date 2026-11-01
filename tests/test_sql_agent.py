@@ -21,18 +21,17 @@ from src.utils.sql_database import (
 
 
 def _database_available() -> bool:
+    """True when the store is loaded and the reader role can log in."""
     try:
-        settings = get_settings()
-        with psycopg.connect(settings.database_url, connect_timeout=2) as conn:
-            conn.execute("SELECT 1 FROM products LIMIT 1")
-            conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (settings.database_reader_user,))
+        run_readonly_query("SELECT 1 FROM products LIMIT 1")
         return True
     except Exception:
         return False
 
 
 DB_AVAILABLE = _database_available()
-requires_db = unittest.skipUnless(DB_AVAILABLE, "PostgreSQL store database not available")
+requires_db = unittest.skipUnless(
+    DB_AVAILABLE, "store database not reachable as the reader role: start PostgreSQL and run `make load-db`")
 
 
 def llm_reply(payload: dict) -> dict:
@@ -99,7 +98,10 @@ class TestReadOnlyDatabase(unittest.TestCase):
 
 
 @requires_db
-class TestSqlAgent(unittest.TestCase):
+class TestSqlAgentWithDatabase(unittest.TestCase):
+    """SQL agent with a mocked LLM but the real database. Pure agent logic
+    (refusals, unsafe SQL, invalid output) is in test_agents.py."""
+
     @patch("src.agents.sql_agent.llm")
     def test_answers_with_rows(self, mock_llm):
         from src.agents.sql_agent import run_sql_agent
@@ -141,26 +143,6 @@ class TestSqlAgent(unittest.TestCase):
         self.assertTrue(any('column "price" does not exist' in m["content"]
                             for m in retry_messages if m["role"] == "user"))
 
-    @patch("src.agents.sql_agent.llm")
-    def test_unsafe_sql_is_not_retried(self, mock_llm):
-        from src.agents.sql_agent import run_sql_agent
-        mock_llm.invoke.return_value = llm_reply({"sql": "DELETE FROM orders"})
-
-        result = run_sql_agent("apague os pedidos")
-
-        self.assertEqual(result["status"], "error")
-        self.assertEqual(mock_llm.invoke.call_count, 1)
-
-    @patch("src.agents.sql_agent.llm")
-    def test_refusal_is_passed_through(self, mock_llm):
-        from src.agents.sql_agent import run_sql_agent
-        mock_llm.invoke.return_value = llm_reply(
-            {"sql": None, "reason": "Would expose other customers' data."})
-
-        result = run_sql_agent("Liste o e-mail de todos os clientes")
-
-        self.assertEqual(result["status"], "not_answerable")
-        self.assertIn("other customers", result["reason"])
 
 
 if __name__ == "__main__":

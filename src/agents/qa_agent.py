@@ -10,8 +10,6 @@ MODEL_NAME = OpenRouterLLM.DEFAULT_MODEL
 
 @lru_cache(maxsize=1)
 def get_agent() -> BaseAgent:
-    # Created on first use: loading the embedding model is slow, and importing
-    # this module (e.g. in tests or the API) shouldn't pay for it.
     return BaseAgent(model_name=MODEL_NAME)
 
 
