@@ -17,11 +17,6 @@ st.title("Interface RAG Customer Service")
 # Chat history for this browser session, so follow-up questions keep context.
 st.session_state.setdefault("messages", [])
 
-with st.sidebar:
-    if st.button("Nova conversa", disabled=not st.session_state.messages):
-        st.session_state.messages = []
-        st.rerun()
-
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -39,3 +34,9 @@ if prompt := st.chat_input("Ask your question about the Music Emporium Store:"):
         {"role": "user", "content": prompt},
         {"role": "assistant", "content": reply},
     ]
+
+# Drawn last so the button is enabled as soon as the first message exists.
+with st.sidebar:
+    if st.button("Nova conversa", disabled=not st.session_state.messages):
+        st.session_state.messages = []
+        st.rerun()

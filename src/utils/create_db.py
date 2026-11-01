@@ -1,12 +1,13 @@
 """
 Build the Chroma vector store from the store policy PDF(s) in data/.
 
-Run with:  python -m src.utils.create_db
+Run with:  python -m src.utils.create_db [--if-empty]
 
 The CSV tables are not embedded: they are loaded into PostgreSQL
 (src/utils/create_sql_db.py) and queried by the SQL agent, which handles
 joins and exact numbers far better than similarity search over rows.
 """
+import argparse
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -95,4 +96,13 @@ def add_file_to_chroma_db(file_path: str) -> None:
 
 
 if __name__ == "__main__":
-    create_chroma_db()
+    parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    parser.add_argument("--if-empty", action="store_true",
+                        help="skip if the vector store already has documents (used on docker start)")
+    args = parser.parse_args()
+
+    existing = get_vector_store()._collection.count() if args.if_empty else 0
+    if existing:
+        print(f"Chroma DB already has {existing} chunks; skipping (run without --if-empty to rebuild).")
+    else:
+        create_chroma_db()
