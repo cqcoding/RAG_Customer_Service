@@ -1,4 +1,4 @@
-.PHONY: help setup install test clean run verify db-up load-db docker-up docker-down docker-logs
+.PHONY: help setup install test clean run db-up load-db docker-up docker-down docker-logs
 
 help:
 	@echo "RAG_Customer_Service - RAG System"
@@ -7,7 +7,6 @@ help:
 	@echo "  make setup      - Create virtual environment and install dependencies"
 	@echo "  make install    - Install dependencies in existing venv"
 	@echo "  make test       - Run tests"
-	@echo "  make verify     - Verify setup"
 	@echo "  make db-up      - Start PostgreSQL (docker compose)"
 	@echo "  make load-db    - Load CSVs into PostgreSQL and the PDF into Chroma"
 	@echo "  make docker-up  - Build and run everything in Docker (chat on :8501, API on :8000)"
@@ -33,10 +32,6 @@ install:
 test:
 	@echo "Running tests..."
 	pytest tests/ -v
-
-verify:
-	@echo "Verifying setup..."
-	python verify_setup.py
 
 db-up:
 	docker compose up -d postgres

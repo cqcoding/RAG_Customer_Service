@@ -100,35 +100,6 @@
       ]
     },
     {
-      "name": "File Management",
-      "item": [
-        {
-          "name": "Upload File",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "body": {
-              "mode": "formdata",
-              "formdata": [
-                {
-                  "key": "file",
-                  "type": "file",
-                  "src": ""
-                }
-              ]
-            },
-            "url": {
-              "raw": "{{base_url}}/upload",
-              "host": ["{{base_url}}"],
-              "path": ["upload"]
-            },
-            "description": "Faz upload de um novo arquivo para indexar (tipos: .txt, .pdf, .html, .htm)"
-          },
-          "response": []
-        }
-      ]
-    },
-    {
       "name": "Logs & Monitoring",
       "item": [
         {

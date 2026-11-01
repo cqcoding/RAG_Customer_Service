@@ -79,22 +79,6 @@ def create_chroma_db():
     print(f"Chroma DB created at {settings.chroma_db_path}")
 
 
-def add_file_to_chroma_db(file_path: str) -> None:
-    """Add one more policy PDF to the existing vector store."""
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-    if path.suffix.lower() != ".pdf":
-        raise ValueError(
-            f"Unsupported file type: {path.suffix}. Only PDFs go into the vector store; "
-            "store data (CSV) goes into PostgreSQL via src/utils/create_sql_db.py."
-        )
-
-    _, chunks = split_documents(add_metadata(PyPDFLoader(str(path)).load()))
-    add_chunks(get_vector_store(), chunks)
-    print(f"Added file to Chroma DB: {file_path}")
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     parser.add_argument("--if-empty", action="store_true",
