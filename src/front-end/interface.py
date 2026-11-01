@@ -7,11 +7,11 @@ import streamlit as st
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-os.chdir(ROOT_DIR)  # Set working directory to project root
+os.chdir(ROOT_DIR)  
 
 from src.agents.orchestrator import answer  # noqa: E402
 
-st.set_page_config(page_title="Music Emporium Store", page_icon="🎸")
+st.set_page_config(page_title="Music Emporium Store")
 st.title("Interface RAG Customer Service")
 
 # Chat history for this browser session, so follow-up questions keep context.
