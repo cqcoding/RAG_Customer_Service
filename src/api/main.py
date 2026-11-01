@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pathlib import Path
@@ -32,11 +32,6 @@ class QueryResponse(BaseModel):
     final_answer: str
     latency_ms: float
     status: str
-
-class UploadResponse(BaseModel):
-    filename: str
-    status: str
-    message: str
 
 class LogEntry(BaseModel):
     timestamp: str

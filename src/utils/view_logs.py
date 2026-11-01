@@ -22,6 +22,8 @@ def view_llm_logs():
         for line in f:
             try:
                 entry = json.loads(line)
+                if entry.get("event_type") != "llm_call":
+                    continue
                 print(f"[{entry['timestamp']}] {entry['provider']} - {entry['model']}")
                 print(f"  Agent: {entry.get('agent', 'N/A')}")
                 print(f"  Status: {entry['status']}")
