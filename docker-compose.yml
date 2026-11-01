@@ -1,52 +1,77 @@
+# Run everything:   docker compose up -d --build
+#   Chat (Streamlit):  http://localhost:8501
+#   API docs:          http://localhost:8000/docs
+# Only the chat:    docker compose up -d --build frontend
+#
+# On start, the one-shot `init` service loads the CSVs into PostgreSQL and
+# builds the vector store (only the first time). To rebuild the vector store
+# after changing the PDF:  docker compose run --rm init python -m src.utils.create_db
+
+# Shared by every service that runs the app image.
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: rag-customer-service:latest
+  # All your settings (OPENROUTER_API_KEY, ROUTER_LLM_MODEL, ...) come from .env.
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # Overrides the localhost URL in .env: inside Docker, the database is
+    # reached by its service name on the internal network.
+    DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@postgres:5432/${POSTGRES_DB:-store}
+    CHROMA_DB_PATH: /app/chroma_db
+    FASTEMBED_CACHE_PATH: /models
+  volumes:
+    - ./data:/app/data            # CSVs and policy PDF, editable without rebuilding
+    - chroma-data:/app/chroma_db  # vector store, separate from your local ./chroma_db
+    - model-cache:/models         # embedding model, downloaded once
+    - app-logs:/app/logs
+  networks:
+    - rag-network
+
 services:
-  # FastAPI REST API
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@postgres:5432/${POSTGRES_DB:-store}
-    volumes:
-      - ./data:/app/data
-      - ./chroma_db:/app/chroma_db
-      - ./logs:/app/logs
+  # One-shot setup: load store data and build the vector store, then exit.
+  init:
+    <<: *app
+    command: >
+      sh -c "python -m src.utils.create_sql_db &&
+             python -m src.utils.create_db --if-empty"
+    restart: "no"
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
-    command: python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
-    networks:
-      - rag-network
 
-  # Streamlit Frontend
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  # FastAPI REST API
+  api:
+    <<: *app
     ports:
-      - "8501:8501"
-    environment:
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@postgres:5432/${POSTGRES_DB:-store}
-    volumes:
-      - ./data:/app/data
-      - ./chroma_db:/app/chroma_db
-      - ./logs:/app/logs
-    depends_on:
-      - api
+      - "${API_PORT:-8000}:8000"
+    command: python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
-    command: streamlit run src/front-end/interface.py --server.port=8501 --server.address=0.0.0.0
-    networks:
-      - rag-network
+    depends_on:
+      init:
+        condition: service_completed_successfully
 
-  # Chroma runs embedded in the api/frontend processes, persisted in the
-  # ./chroma_db volume above, so it needs no service of its own.
+  # Streamlit chat. It runs the agents itself, so it doesn't need the api service.
+  frontend:
+    <<: *app
+    ports:
+      - "${FRONTEND_PORT:-8501}:8501"
+    command: streamlit run src/front-end/interface.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    depends_on:
+      init:
+        condition: service_completed_successfully
 
   # PostgreSQL (store data: products, orders, customers, promotions)
-  # Load the CSVs with: docker compose run --rm api python -m src.utils.create_sql_db
   postgres:
     image: postgres:16-alpine
     ports:
@@ -69,6 +94,9 @@ services:
 
 volumes:
   postgres-data:
+  chroma-data:
+  model-cache:
+  app-logs:
 
 networks:
   rag-network:

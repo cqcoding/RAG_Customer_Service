@@ -1,4 +1,4 @@
-.PHONY: help setup install test clean run verify db-up load-db
+.PHONY: help setup install test clean run verify db-up load-db docker-up docker-down docker-logs
 
 help:
 	@echo "RAG_Customer_Service - RAG System"
@@ -10,6 +10,9 @@ help:
 	@echo "  make verify     - Verify setup"
 	@echo "  make db-up      - Start PostgreSQL (docker compose)"
 	@echo "  make load-db    - Load CSVs into PostgreSQL and the PDF into Chroma"
+	@echo "  make docker-up  - Build and run everything in Docker (chat on :8501, API on :8000)"
+	@echo "  make docker-down - Stop the Docker stack (data volumes are kept)"
+	@echo "  make docker-logs - Follow the Docker stack's logs"
 	@echo "  make clean      - Remove virtual environment and cache files"
 	@echo "  make help       - Show this help message"
 
@@ -41,6 +44,16 @@ db-up:
 load-db:
 	./venv/bin/python -m src.utils.create_sql_db
 	./venv/bin/python -m src.utils.create_db
+
+docker-up:
+	docker compose up -d --build
+	@echo "Chat: http://localhost:$${FRONTEND_PORT:-8501}  |  API docs: http://localhost:$${API_PORT:-8000}/docs"
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f
 
 clean:
 	@echo "Cleaning up..."
