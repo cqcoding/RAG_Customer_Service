@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from datetime import datetime
 
 LOG_DIR = Path("./logs")
 
@@ -106,7 +105,7 @@ def stats():
     
     print(f"Total de chamadas LLM: {total_calls}")
     print(f"Latência média: {total_latency / total_calls:.2f}ms" if total_calls > 0 else "N/A")
-    print(f"\nChamadas por agente:")
+    print("\nChamadas por agente:")
     for agent, count in sorted(by_agent.items()):
         print(f"  {agent}: {count}")
 

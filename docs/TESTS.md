@@ -5,11 +5,12 @@ isolated to slow and realistic:
 
 | Level | File(s) | Needs | Runs by default |
 |---|---|---|---|
-| **Unit** (everything external mocked) | `test_agents.py`, `test_orchestrator.py`, `test_sql_agent.py` (first class) | Nothing: no API key, model or database | Yes |
+| **Unit** (everything external mocked) | `test_agents.py`, `test_orchestrator.py`, `test_api.py`, `test_sql_agent.py` (first class) | Nothing: no API key, model or database | Yes |
 | **Database** (real PostgreSQL, mocked LLM) | `test_sql_agent.py` | A loaded PostgreSQL (`make db-up && make load-db`) | Yes, skipped with a hint if the database isn't reachable |
 | **Behavior** (real LLM, database and vector store) | `test_llm_behavior.py` | `OPENROUTER_API_KEY`, loaded database and Chroma | No: opt-in with `RUN_LLM_TESTS=1` |
 
-64 tests in total: 48 run by default, 16 are opt-in.
+76 tests in total: 60 run by default, 16 are opt-in. The default ones also run
+automatically on GitHub Actions (see [Continuous integration](#continuous-integration-github-actions)).
 
 ---
 
@@ -18,7 +19,7 @@ isolated to slow and realistic:
 ```bash
 source venv/bin/activate
 
-pytest                                   # unit + database tests (48)
+pytest                                   # unit, API and database tests (60)
 pytest tests/test_agents.py -v           # one file
 pytest -k sql -v                         # tests whose name contains "sql"
 
@@ -39,7 +40,7 @@ pytest --cov=src --cov-report=html      # report in htmlcov/index.html
 pytest is launched (no `conftest.py` needed).
 
 **Expected output.** With the database loaded and no `RUN_LLM_TESTS`:
-`48 passed, 16 skipped`. If PostgreSQL isn't running, the database tests are
+`60 passed, 16 skipped`. If PostgreSQL isn't running, the database tests are
 skipped too, with the reason *"store database not reachable as the reader
 role: start PostgreSQL and run `make load-db`"* (shown with `pytest -rs`).
 
@@ -69,12 +70,27 @@ All mocked.
 | `TestSynthesize` | The prompt contains the results and the history; with no results, the strict "no facts" prompt is used; an LLM failure gives the friendly fallback message |
 | `TestWorkflow` | The full graph: a mixed question runs both agents and the synthesizer sees both results; small talk runs no agent; an agent crash still produces an answer |
 
-### `tests/test_sql_agent.py`: the database layer (10 tests)
+### `tests/test_api.py`: the REST API (9 tests)
+
+The workflow is mocked; the API's own behavior is real.
+
+| Class | What it checks |
+|---|---|
+| `TestHealth` | `/health` responds |
+| `TestQuery` | `/query` returns the answer and passes `history` to the workflow; invalid bodies get `422`; a workflow crash gives a `500` with the error and is logged; **requests run concurrently**: three requests with a 0.5 s workflow finish in under 1 s (they would take 1.5 s one at a time) |
+| `TestLogEndpoints` | `/logs/stats` aggregates LLM calls per agent; `/logs/routing-decisions` keeps only routing events; `/logs/llm-calls` skips invalid lines and respects `limit` |
+
+The concurrency test sends all requests through **one event loop** (an async
+`httpx` client), like a real server. It guards against a real bug: the
+endpoint was `async def` while the workflow blocks on HTTP calls, which made
+the API answer one request at a time.
+
+### `tests/test_sql_agent.py`: the database layer (13 tests)
 
 | Class | What it checks |
 |---|---|
 | `TestValidateSelect` (no database) | `SELECT` and `WITH` are accepted; `DELETE`, `UPDATE`, `DROP`, `SET`, multiple statements and empty queries are rejected |
-| `TestReadOnlyDatabase` | The schema description lists every table, foreign keys and comments; a join returns JSON-friendly values (dates as text, numbers as floats); **writes that get past the statement check** (a `DELETE` inside `WITH`, a `DELETE` through `query_to_xml`) are **refused by PostgreSQL**, and the data is intact afterwards; queries run as `store_reader`; the 50-row cap and `truncated` flag work |
+| `TestReadOnlyDatabase` | The schema description lists every table, foreign keys and comments; a join returns JSON-friendly values (dates as text, numbers as floats); **writes that get past the statement check** (a `DELETE` inside `WITH`, a `DELETE` through `query_to_xml`) are **refused by PostgreSQL**, and the data is intact afterwards; queries run as `store_reader`; the 50-row cap and `truncated` flag work; **customers' personal data can't be read**: `email`, `name`, `phone` and `SELECT *` on `customers` (directly or through a join) are refused with *permission denied*, while `customer_id` and `city` stay readable, and the schema description shown to the agent omits the hidden columns |
 | `TestSqlAgentWithDatabase` | The agent with a mocked LLM against the real data: order 8 → shipped, `BRJL5544332BR`; Yamaha C40 → R$ 599,90; the retry receives PostgreSQL's real error message (`column "price" does not exist`) |
 
 ### `tests/test_llm_behavior.py`: real behavior (16 tests, opt-in)
@@ -118,6 +134,35 @@ Because the model isn't fully deterministic, run a failing test a few times to
 see whether it fails consistently. These tests found a real bug: with no
 agent results, the synthesizer answered *"A capital da França é Paris"*
 before declining, which led to the strict no-results prompt.
+
+---
+
+## Continuous integration (GitHub Actions)
+
+The workflow in `.github/workflows/ci.yml` runs on **every push to `main`**
+and **every pull request**. It has two jobs, which run in parallel:
+
+| Job | Steps |
+|---|---|
+| **Lint (ruff)** | Installs the `ruff` version pinned in `requirements.txt`, runs `ruff check` (rules in `ruff.toml`) |
+| **Tests (pytest + PostgreSQL)** | Starts a PostgreSQL 16 service, installs `requirements.txt` on Python 3.12, loads the data with `create_sql_db`, checks the read-only role can query it, runs `pytest -v -rs` |
+
+The check before `pytest` matters: the database tests skip themselves when
+PostgreSQL is unreachable, which locally is convenient, but in CI would turn a
+broken setup into a green check. The real-LLM tests always skip in CI (no API
+key, and they cost money).
+
+**Where to see the results:**
+
+- On a pull request: the checks appear at the bottom of the conversation,
+  with a ✓ or ✗ next to each job. "Details" opens the logs.
+- In the repository's **Actions** tab: every run, with the logs of each step.
+- In the README: the CI badge shows the status of `main`.
+
+**When CI fails:** open the failed job, expand the red step, and read the
+error. Reproduce it locally with the same command (`ruff check`, or `pytest`
+with PostgreSQL running), fix it, commit and push to the same branch: CI runs
+again automatically.
 
 ---
 

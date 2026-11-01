@@ -19,7 +19,7 @@ CREATE TABLE customers (
     email        TEXT,
     city         TEXT
 );
-COMMENT ON TABLE customers IS 'Registered customers. Personal data (name, phone, email): never return it.';
+COMMENT ON TABLE customers IS 'Registered customers. Only customer_id and city are readable: personal data is not accessible.';
 COMMENT ON COLUMN customers.phone IS 'Format: (DD) 9XXXX-XXXX';
 
 CREATE TABLE products (

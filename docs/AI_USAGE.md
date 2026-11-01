@@ -178,6 +178,8 @@ yet. Each one was explained, then fixed with a test where possible:
 | The vector store build appended instead of rebuilding | Each rebuild duplicated every chunk |
 | The log viewer assumed every log line was an LLM call | Option 1 of the viewer crashed |
 | `.env.example` suggested settings the code never reads | One of them would have broken the vector store |
+| `/query` was `async def` around blocking code (found in a final review) | The API answered one request at a time; measured, fixed, and covered by a test |
+| Six dependencies were never imported (found in a final review) | Slower installs and an unclear dependency list |
 
 ---
 

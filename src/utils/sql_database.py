@@ -35,6 +35,9 @@ SELECT c.relname                                   AS table_name,
   JOIN pg_namespace n ON n.oid = c.relnamespace
   JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
  WHERE n.nspname = 'public' AND c.relkind = 'r'
+   -- Only what the connected role may read: the agent never sees the
+   -- customers' personal data columns (see create_sql_db.setup_reader_role).
+   AND has_column_privilege(c.oid, a.attnum, 'SELECT')
  ORDER BY c.relname, a.attnum
 """
 
@@ -111,7 +114,7 @@ def run_readonly_query(sql: str, max_rows: int = MAX_ROWS) -> dict:
         conn.rollback()
 
     rows = [
-        {col: _to_json_value(val) for col, val in zip(columns, row)}
+        {col: _to_json_value(val) for col, val in zip(columns, row, strict=True)}
         for row in fetched[:max_rows]
     ]
     return {

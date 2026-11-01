@@ -205,11 +205,3 @@ The logs contain **customers' questions and the assistant's answers**,
 including order details. Keep `logs/` out of git (it already is), restrict
 access to it, and delete old logs. For production, consider logging prompt
 lengths only, not prompt text.
-
----
-
-## Not used yet: `src/utils/tracing.py`
-
-`tracing.py` defines a `Tracer` context manager and a `@trace_llm_call`
-decorator for automatic timing, but nothing in the code uses them yet. All
-current logging goes through `StructuredLogger` directly.

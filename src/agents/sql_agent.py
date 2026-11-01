@@ -87,7 +87,7 @@ def run_sql_agent(query: str) -> dict:
             })
             plan = _generate_sql(messages)
             if not plan.get("sql"):
-                raise ValueError(plan.get("reason", "Could not write a valid query."))
+                raise ValueError(plan.get("reason", "Could not write a valid query.")) from db_error
             result = run_readonly_query(plan["sql"])
 
         return {
