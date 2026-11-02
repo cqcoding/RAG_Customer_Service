@@ -4,21 +4,6 @@ This document explains how the assistant works, why it is built this way, and
 what its limits are. It is meant to be read top to bottom the first time, and
 used as a reference afterwards.
 
-- [1. The problem](#1-the-problem)
-- [2. Technology stack](#2-technology-stack)
-- [3. High-level overview](#3-high-level-overview)
-- [4. Request flow, step by step](#4-request-flow-step-by-step)
-- [5. The orchestrator (LangGraph)](#5-the-orchestrator-langgraph)
-- [6. The policy agent (RAG)](#6-the-policy-agent-rag)
-- [7. The store data agent (text-to-SQL)](#7-the-store-data-agent-text-to-sql)
-- [8. Conversation memory](#8-conversation-memory)
-- [9. LLMs and the OpenRouter client](#9-llms-and-the-openrouter-client)
-- [10. Interfaces](#10-interfaces)
-- [11. Configuration](#11-configuration)
-- [12. Design decisions and how they evolved](#12-design-decisions-and-how-they-evolved)
-- [13. Known limitations and next steps](#13-known-limitations-and-next-steps)
-- [14. References](#14-references)
-
 ---
 
 ## 1. The problem
@@ -442,80 +427,6 @@ The endpoints that do blocking work (`/query`, the log endpoints) are plain
 several questions are answered at the same time. An `async def` endpoint that
 calls blocking code would stall the server's event loop, and the API would
 answer one request at a time (a bug found in review, now covered by a test).
-
----
-
-## 11. Configuration
-
-All settings live in `src/config.py` and can be set in `.env` or as
-environment variables (names are case-insensitive).
-
-| Setting | Default | Purpose |
-|---|---|---|
-| `OPENROUTER_API_KEY` | none | Required for every LLM call |
-| `ROUTER_LLM_MODEL` | `google/gemini-2.5-flash-lite` | Model used by the router |
-| `DATABASE_URL` | `postgresql://rag:rag@localhost:5432/store` | Owner account: used by the loader only |
-| `DATABASE_READER_USER` / `DATABASE_READER_PASSWORD` | `store_reader` / `store_reader` | Read-only role used by the SQL agent (same host and database as `DATABASE_URL`) |
-| `CHROMA_DB_PATH` | `./chroma_db` | Vector store folder |
-| `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | FastEmbed model; rebuild the vector store after changing it |
-
-Docker-only settings (`POSTGRES_*`, `API_PORT`, `FRONTEND_PORT`) are described
-in [DOCKER.md](DOCKER.md).
-
----
-
-## 12. Design decisions and how they evolved
-
-The project started from the code of an earlier personal project, a **RAG
-financial analyst** (agents for metric extraction, sentiment analysis and Q&A
-over financial filings). The sections below record the main changes made to
-turn it into this assistant, and why. How AI assistance was used in this
-process is described in [AI_USAGE.md](AI_USAGE.md).
-
-### 12.1 From embedding the CSVs to PostgreSQL
-
-1. **First version:** the CSVs were loaded into Chroma with `TextLoader`,
-   which turns each file into one block of text. The splitters then cut that
-   text in the middle of rows, and the column headers were lost: 76 of 107
-   chunks were fragments like `",9,active,"{""top"":""Spruce""…`, which
-   neither search nor the LLM could interpret.
-2. **Second version:** `CSVLoader`, with one document per row written as
-   `column: value` lines, giving 191 clean row documents.
-3. **Final version:** questions like *"what did this order contain?"* need
-   data from 3 or 4 tables at once, which similarity search doesn't reliably
-   return together. The tables moved to PostgreSQL with a text-to-SQL agent,
-   and only the policy PDF stayed in Chroma.
-
-### 12.2 Customer authentication: built, then deliberately removed
-
-A version with real customer isolation was built: PostgreSQL **row-level
-security** on `customers`, `orders` and `order_items`, keyed on a customer id
-fixed when the connection opens, with identification by e-mail plus order
-number. It was removed on purpose, because authentication is out of scope for
-this stage. Privacy now relies on column-level grants (personal data can't be
-read at all), the read-only role and the prompt rules (see
-[limitations](#13-known-limitations-and-next-steps)). The design is
-recorded here so it can be brought back.
-
-### 12.3 Other changes
-
-| Change | Reason |
-|---|---|
-| Finance agents (extractor, sentiment) replaced by the SQL agent | They didn't fit the domain |
-| Router and synthesizer prompts rewritten for a store, in Portuguese, with examples | The old prompts were for financial reports |
-| Router reply cleaned of ```` ```json ```` fences before parsing | Fenced replies made the router silently pick no agent ("No results found") |
-| Smaller model for routing; removed a fixed 5-second wait in the UI | Latency |
-| Conversation memory | Follow-up questions failed |
-| Strict prompt when no agent runs | The model answered off-topic questions from general knowledge |
-| Logger fed JSON strings instead of dicts | The logger slices its input, which raised on dicts and turned every success into an error |
-| Embedding model loaded lazily | Importing the app shouldn't download or load a model |
-| Vector store rebuilt instead of appended | Re-running the build duplicated every chunk |
-| Docker: complete requirements, NLTK data in the image, model cache, `init` service | The image was missing packages, and the stack needed manual steps |
-| Upload endpoint and HTML/TXT ingestion removed | Not needed for this project |
-| `/query` changed from `async def` to `def` | The blocking workflow inside an `async` endpoint made the API answer one request at a time |
-| Column-level grants on `customers` | Personal data protected by the database, not only by the prompt |
-| Unused dependencies removed, every version pinned | Leftovers from the base project; reproducible installs in Docker and CI |
-| `ruff`, GitHub Actions CI, API tests; unused `tracing.py` removed | Automated proof that `main` works; less dead code |
 
 ---
 

@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/cqcoding/RAG_Customer_Service/actions/workflows/ci.yml/badge.svg)](https://github.com/cqcoding/RAG_Customer_Service/actions/workflows/ci.yml)
 
+## Overview
+
 A customer service assistant for **Empório da Música**, a Brazilian musical
 instrument store in Campo Grande (shown in the chat as "Music Emporium Store").
 Customers ask questions in natural language, in Portuguese or English, and the
@@ -17,16 +19,6 @@ runs the matching agents in parallel and combines their results into one
 answer. The assistant keeps the conversation context, so follow-up questions
 like *"e tem desconto?"* work.
 
-```
-"Meu pedido 5 chegou com defeito, posso trocar?"
-        │
-        ├─► store_database     → order 5: delivered, Crafter D-8 Dreadnought Natural
-        └─► question_answerer  → policy 4.2: defective products can be exchanged within 30 days
-        │
-        ▼
-"Seu pedido 5 (Crafter D-8 Dreadnought Natural) consta como entregue. Pela nossa
- política, produtos com defeito de fabricação podem ser trocados em até 30 dias…"
-```
 
 ---
 
@@ -100,63 +92,14 @@ See [docs/TESTS.md](docs/TESTS.md).
 
 ---
 
-## Project structure
-
-```
-├── data/                         Store data: 6 CSV tables + políticas_da_loja.pdf
-├── docs/                         Documentation and Postman collection
-├── src/
-│   ├── agents/
-│   │   ├── orchestrator.py       LangGraph workflow: router, agents fan-out, synthesizer, memory
-│   │   ├── qa_agent.py           Policy agent: RAG over the PDF
-│   │   ├── sql_agent.py          Store data agent: writes and runs SQL
-│   │   └── base_agent.py         Shared LLM + retriever setup, JSON cleanup
-│   ├── api/main.py               FastAPI REST API
-│   ├── front-end/interface.py    Streamlit chat
-│   ├── models/model_llm.py       OpenRouter client with retries and model fallback
-│   ├── config.py                 Settings (from environment / .env)
-│   └── utils/
-│       ├── create_sql_db.py      Loads the CSVs into PostgreSQL, creates the read-only role
-│       ├── sql/schema.sql        Tables, keys and column comments (also the SQL agent's documentation)
-│       ├── sql_database.py       Read-only query execution and schema description
-│       ├── create_db.py          Builds the Chroma vector store from the PDF
-│       ├── retriever.py          Chroma retriever (MMR)
-│       ├── logger.py             Structured JSON logging
-│       └── view_logs.py          Interactive log viewer
-├── tests/                        Unit, API, database and LLM behavior tests
-├── .github/workflows/ci.yml      CI: lint + tests on every push to main and every pull request
-├── Dockerfile, docker-compose.yml
-├── Makefile                      Shortcuts: setup, db-up, load-db, docker-up, test, lint, …
-├── ruff.toml                     Linter settings
-└── .env.example                  All settings, with defaults
-```
-
----
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How it works: components, request flow, data layer, RAG pipeline, LLMs, design decisions and their history, limitations |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, request flow, data layer, RAG pipeline, LLMs, design decisions and their history, limitations |
 | [docs/API.md](docs/API.md) | REST API reference with examples |
 | [docs/DOCKER.md](docs/DOCKER.md) | Docker setup, services, volumes, configuration, troubleshooting |
 | [docs/LOGGING.md](docs/LOGGING.md) | What is logged, log format, viewer and log endpoints |
 | [docs/TESTS.md](docs/TESTS.md) | Test strategy, what each test file covers, how to run them |
 | [docs/AI_USAGE.md](docs/AI_USAGE.md) | How AI was used to build this project, and the review workflow |
-
----
-
-## The data
-
-| Source | Contents |
-|---|---|
-| `categories.csv` | 9 product categories (Guitarras, Violões, Ukuleles, …) |
-| `products.csv` | 65 products with price, stock, status (`active`, `discontinued`, `coming_soon`) and JSON specs |
-| `promotions.csv` | 25 promotions, 4 of them active |
-| `customers.csv` | 50 customers (name, phone, e-mail, city) |
-| `orders.csv` | 20 orders with status, payment method, tracking code and notes |
-| `order_items.csv` | 22 order lines linking orders and products |
-| `políticas_da_loja.pdf` | Store policy manual, 8 pages, 10 sections: about the store, opening hours, payment methods, returns and exchanges, shipping, promotions, WhatsApp service, warranty, privacy, final provisions |
-
-`customers.csv` contains personal data. It is fine for this challenge dataset,
-but real customer data should not be committed to git.
