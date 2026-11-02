@@ -1,4 +1,5 @@
 # RAG Customer Service
+## Cecília Quaresma - AI Engineer – Full-Stack para Aplicações com IA Generativa 
 
 [![CI](https://github.com/cqcoding/RAG_Customer_Service/actions/workflows/ci.yml/badge.svg)](https://github.com/cqcoding/RAG_Customer_Service/actions/workflows/ci.yml)
 
