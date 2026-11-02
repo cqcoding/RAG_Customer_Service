@@ -199,9 +199,3 @@ grep '"status": "error"' logs/llm_calls.jsonl | tail -n 5
 
 ---
 
-## Privacy
-
-The logs contain **customers' questions and the assistant's answers**,
-including order details. Keep `logs/` out of git (it already is), restrict
-access to it, and delete old logs. For production, consider logging prompt
-lengths only, not prompt text.

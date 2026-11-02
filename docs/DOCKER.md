@@ -63,26 +63,6 @@ first time.
 
 ---
 
-## The image (`Dockerfile`)
-
-1. `python:3.12-slim`, plus `gcc`.
-2. `pip install -r requirements.txt`.
-3. Downloads NLTK's `punkt_tab` sentence tokenizer into the image
-   (`NLTK_DATA=/usr/local/share/nltk_data`). The build **fails** if this
-   download fails, instead of producing an image that breaks later.
-4. Copies the project. `.dockerignore` leaves out `.env`, `venv/`,
-   `chroma_db/`, `logs/`, `tests/`, `docs/` and caches, so secrets and local
-   state never end up in the image.
-5. Sets `FASTEMBED_CACHE_PATH=/models`, where the embedding model is stored.
-
-Behind an HTTP proxy that intercepts TLS, NLTK refuses to download by
-default. Build with:
-
-```bash
-docker compose build --build-arg NLTK_ALLOW_PROXIED_URLOPEN=1
-```
-
----
 
 ## Configuration
 
