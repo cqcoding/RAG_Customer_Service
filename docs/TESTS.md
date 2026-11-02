@@ -9,7 +9,7 @@ isolated to slow and realistic:
 | **Database** (real PostgreSQL, mocked LLM) | `test_sql_agent.py` | A loaded PostgreSQL (`make db-up && make load-db`) | Yes, skipped with a hint if the database isn't reachable |
 | **Behavior** (real LLM, database and vector store) | `test_llm_behavior.py` | `OPENROUTER_API_KEY`, loaded database and Chroma | No: opt-in with `RUN_LLM_TESTS=1` |
 
-76 tests in total: 60 run by default, 16 are opt-in. The default ones also run
+84 tests in total: 68 run by default, 16 are opt-in. The default ones also run
 automatically on GitHub Actions (see [Continuous integration](#continuous-integration-github-actions)).
 
 ---
@@ -19,7 +19,7 @@ automatically on GitHub Actions (see [Continuous integration](#continuous-integr
 ```bash
 source venv/bin/activate
 
-pytest                                   # unit, API and database tests (60)
+pytest                                   # unit, API and database tests (68)
 pytest tests/test_agents.py -v           # one file
 pytest -k sql -v                         # tests whose name contains "sql"
 
@@ -40,7 +40,7 @@ pytest --cov=src --cov-report=html      # report in htmlcov/index.html
 pytest is launched (no `conftest.py` needed).
 
 **Expected output.** With the database loaded and no `RUN_LLM_TESTS`:
-`60 passed, 16 skipped`. If PostgreSQL isn't running, the database tests are
+`68 passed, 16 skipped`. If PostgreSQL isn't running, the database tests are
 skipped too, with the reason *"store database not reachable as the reader
 role: start PostgreSQL and run `make load-db`"* (shown with `pytest -rs`).
 
@@ -48,18 +48,19 @@ role: start PostgreSQL and run `make load-db`"* (shown with `pytest -rs`).
 
 ## What each file covers
 
-### `tests/test_agents.py`: the agents and the LLM client (26 tests)
+### `tests/test_agents.py`: the agents and the LLM client (30 tests)
 
 All mocked, so these run anywhere.
 
 | Class | What it checks |
 |---|---|
-| `TestBaseAgent` | Removing ```` ```json ```` fences from model replies (several variants); plain JSON untouched; the agent builds its LLM and retriever |
-| `TestPolicyQAAgent` | Answers come from the retrieved policy chunks; the prompt contains the chunks, the question, the store persona and the "exclusively from the context" rule (and nothing left from the finance project); fenced replies are parsed; when nothing is retrieved, the LLM isn't called; `run_policy_qa` returns the documented shape; invalid JSON, retriever failure and LLM failure become error results |
-| `TestSqlAgent` | Successful result (rows, SQL, row count); the prompt contains the schema and the store rules (ILIKE, active promotions, discontinued products, CURRENT_DATE, privacy, LIMIT); refusals never touch the database; a database error is retried once, with the error shown to the model; a second failure is reported; unsafe SQL is not retried; invalid model output and an unavailable LLM become errors |
-| `TestOpenRouterLLM` | Returns content and the model used; rate limits are retried with 2 s and 4 s waits; server errors and empty responses move to the next model; an error when every model fails (1 + 4 attempts); fallback can be disabled |
+| `TestBaseAgent` | Removing ```` ```json ```` fences from model replies (several variants); plain JSON untouched |
+| `TestPolicyQAAgent` | Returns the retrieved excerpts with source file and page (1-based) and a sorted source list; **calls no LLM**; nothing retrieved gives `not_found`; missing page metadata is handled; a retriever failure becomes an error result |
+| `TestSqlAgent` | Successful result (rows, SQL, row count); the prompt contains the schema and the store rules (ILIKE, active promotions, discontinued products, CURRENT_DATE, privacy, LIMIT); refusals never touch the database; a database error is retried once, with the error shown to the model; a second failure is reported; unsafe SQL is not retried; invalid model output and an unavailable LLM become errors; the question's deadline is passed to the LLM |
+| `TestOpenRouterLLM` | Returns content and the model used; rate limits are retried with 2 s and 4 s waits; server errors and empty responses move to the next model; an error when every model fails; fallback can be disabled; each model is tried once (no duplicate); invalid key, no credits and access denied (401/402/403) stop at once |
+| `TestOpenRouterLLMTimeLimit` | No attempt once the deadline passed; each request's timeout is capped by the time left (60 s without a deadline); retry waits that would overrun are skipped; the client stops between models when time runs out |
 
-### `tests/test_orchestrator.py`: routing, memory and synthesis (12 tests)
+### `tests/test_orchestrator.py`: routing, memory, synthesis and the time limit (16 tests)
 
 All mocked.
 
@@ -67,8 +68,8 @@ All mocked.
 |---|---|
 | `TestClassifyQuery` | The router parses fenced JSON; invalid output and unknown agent names give no route; the router sees the recent history in the expected format; history is limited to the last 6 messages and 600 characters each |
 | `TestRouteToAgents` | One parallel branch per classification, each with its own sub-question; no classification goes straight to the synthesizer |
-| `TestSynthesize` | The prompt contains the results and the history; with no results, the strict "no facts" prompt is used; an LLM failure gives the friendly fallback message |
-| `TestWorkflow` | The full graph: a mixed question runs both agents and the synthesizer sees both results; small talk runs no agent; an agent crash still produces an answer |
+| `TestSynthesize` | The prompt contains the results and the history; with no results, the strict "no facts" prompt is used; an LLM failure gives the friendly fallback message; the prompt contains today's date and the rules for applying policy excerpts |
+| `TestWorkflow` | The full graph: a mixed question runs both agents and the synthesizer sees both results; small talk runs no agent; an agent crash still produces an answer; one deadline (now + `QUESTION_TIME_LIMIT_S`) is shared by the router, SQL agent and synthesizer; `run()` exposes the route and each agent's result; a time-out gives the fallback answer |
 
 ### `tests/test_api.py`: the REST API (9 tests)
 
@@ -170,7 +171,7 @@ again automatically.
 
 - Prefer **unit tests with mocks** for logic. Patch where a name is *used*,
   for example `src.agents.sql_agent.llm` or
-  `src.agents.qa_agent.OpenRouterLLM`, not where it's defined.
+  `src.agents.qa_agent._retriever`, not where it's defined.
 - Use the **real database** when the behavior depends on PostgreSQL (SQL
   errors, permissions, types). Use `requires_db` from `test_sql_agent.py` so
   the test skips cleanly without a database.

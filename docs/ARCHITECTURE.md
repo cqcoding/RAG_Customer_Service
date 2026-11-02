@@ -105,8 +105,10 @@ Example: the customer previously asked about the *Ohana CK-20*, and now writes
 6. **Logging.** The routing decision, each agent run and each LLM call are
    written to `logs/llm_calls.jsonl` (see [LOGGING.md](LOGGING.md)).
 
-A typical request makes 3 LLM calls (router, SQL or RAG agent, synthesizer),
-or 4 when both agents run.
+A data question makes 3 LLM calls (router, SQL agent, synthesizer); a policy
+question makes 2, because the policy agent only retrieves (router,
+synthesizer). The whole question has a **30-second time budget** shared by all
+its LLM calls (see [9.3](#93-retries-and-the-time-limit)).
 
 ---
 
@@ -131,6 +133,7 @@ class RouterState(TypedDict, total=False):
     classifications: list[Classification]
     results: Annotated[list[AgentOutput], operator.add]   # reducer merges parallel results
     final_answer: str
+    deadline: float                 # time.monotonic() after which no new LLM call starts
 ```
 
 `results` uses `operator.add` as a reducer: each agent returns a one-item list,
@@ -171,11 +174,14 @@ Two prompts:
   general prompt, the model once answered *"A capital da França é Paris"*
   before declining (caught by the behavior tests, see [TESTS.md](TESTS.md)).
 
-If the LLM call fails, a fixed, polite fallback message is returned.
+The prompt includes **today's date**, so policy rules can be applied to real
+orders (for example, "7 days after delivery" compared with the order's
+delivery date). If the LLM call fails, or the question's time budget runs out,
+a fixed, polite fallback message is returned.
 
 ---
 
-## 6. The policy agent (RAG)
+## 6. The policy agent (retrieval)
 
 Files: `src/agents/qa_agent.py`, `src/utils/create_db.py`, `src/utils/retriever.py`.
 
@@ -225,16 +231,24 @@ downloaded on first use (in Docker, into a cached volume).
 Note: this model was trained mostly on English, while the policy and most
 questions are in Portuguese. See [limitations](#13-known-limitations-and-next-steps).
 
-### 6.4 Retrieval and answering
+### 6.4 Retrieval
 
 - The retriever uses **MMR** (maximal marginal relevance): it fetches the 25
   most similar chunks and keeps the **6** that are both relevant and
   different from each other, which avoids six near-identical chunks.
-- The prompt tells the model to answer **exclusively** from the retrieved
-  context, to cite sources, to quote exact deadlines and conditions, and to
-  say it couldn't find the answer otherwise.
-- The model replies with JSON: `reasoning`, `final_answer`, `sources`.
-- If nothing is retrieved, the LLM isn't called at all.
+- The agent **doesn't call an LLM**. It returns the excerpts themselves, each
+  with its source file and page, plus a list of sources. Status is `success`,
+  `not_found` (nothing retrieved) or `error`.
+- The synthesizer writes the answer from the excerpts, like it does from the
+  SQL agent's rows: it must answer only from them, quote exact deadlines and
+  conditions, apply them to the customer's situation, and say it doesn't know
+  when they don't cover the question.
+
+Both agents therefore work the same way: **agents fetch evidence; only the
+synthesizer writes prose.** An earlier version had the policy agent write its
+own answer with an LLM, which the synthesizer then rewrote: one extra LLM call
+per policy question, and a summary of a summary, which can blur exact
+deadlines and conditions.
 - The retriever and embedding model are created on first use, not at import,
   so starting the API or running tests doesn't load the model.
 
@@ -252,8 +266,9 @@ products to categories and promotions. Questions like *"what's the discounted
 price?"* or *"what's in order 5?"* need joins and arithmetic. Similarity
 search over rows can't join tables, can't compute, and can't guarantee that
 every relevant row is returned. A database query does all of that exactly.
-See [12.1](#121-from-embedding-the-csvs-to-postgresql) for how the project
-got there.
+The project got there step by step: the CSVs were first embedded as raw text
+(rows were cut in half), then one document per row, before moving to
+PostgreSQL.
 
 ### 7.2 The schema
 
@@ -365,7 +380,7 @@ connects with it.
 | Role | Model | Setting |
 |---|---|---|
 | Router | `google/gemini-2.5-flash-lite` | `ROUTER_LLM_MODEL` |
-| SQL agent, policy agent, synthesizer | `google/gemini-3-flash-preview` | `OpenRouterLLM.DEFAULT_MODEL` |
+| SQL agent, synthesizer | `google/gemini-3-flash-preview` | `OpenRouterLLM.DEFAULT_MODEL` |
 
 All calls use **temperature 0**, which reduces randomness and invented
 details: important when answers involve prices and deadlines.
@@ -393,16 +408,30 @@ If a model fails, the client tries the next one (`FALLBACK_MODELS` in
 
 The router runs on the 4th model by default, with the same chain behind it.
 
-### 9.3 Retries
+### 9.3 Retries and the time limit
 
-For each model, up to **3 attempts**:
+Each model in the chain is tried once in order (duplicates are skipped), with
+up to **3 attempts** per model:
 
-- **429 (rate limit)** or **timeout** (60 s): wait and retry with exponential
+- **429 (rate limit)** or **timeout**: wait and retry with exponential
   backoff, 2 s then 4 s.
+- **401, 402, 403** (invalid key, no credits, access denied): stop at once.
+  These fail the same way on every model, so trying the others would only
+  waste time.
 - **Any other HTTP error, an empty response, or invalid JSON**: move to the
   next model immediately.
 
-If every model fails, the client raises `LLMUnavailableError`. The agents and the
+**Time limit.** Without a limit, the worst case (60 s timeouts, 3 attempts, 5
+models) was about 15 minutes for one question. Now each question gets a
+budget of **30 seconds** (`QUESTION_TIME_LIMIT_S`), set once when the question
+starts and shared by every LLM call in it (router, SQL agent, synthesizer):
+
+- each request's timeout is the smaller of 60 s and the time left;
+- a retry wait that would leave less than 1 s is skipped;
+- no new attempt starts with less than 1 s left.
+
+If every model fails, or the budget runs out, the client raises
+`LLMUnavailableError`. The agents and the
 orchestrator turn that into an error result and, at the end, a polite
 fallback message, so the user never sees a stack trace. With
 `enable_fallback=False`, only the given model is tried.
@@ -434,10 +463,10 @@ answer one request at a time (a bug found in review, now covered by a test).
 
 | Limitation | Impact | Possible next step |
 |---|---|---|
-| **No authentication** | Anyone who knows or guesses an order number can see that order's status, items and tracking code (personal data is safe: the database role can't read it) | Re-enable the row-level security design from [12.2](#122-customer-authentication-built-then-deliberately-removed), plus authentication and rate limiting on the API |
+| **No authentication** | Anyone who knows or guesses an order number can see that order's status, items and tracking code (personal data is safe: the database role can't read it) | Authentication on the API plus PostgreSQL row-level security (a version of this was built and deliberately removed; it's in the git history), and rate limiting |
 | **English embedding model** on Portuguese text | Weaker policy retrieval than possible | Switch `EMBEDDING_MODEL` to a multilingual FastEmbed model such as `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` or `intfloat/multilingual-e5-large`, rebuild Chroma, and compare answers |
 | **LLM non-determinism** | Even at temperature 0, wording and occasionally behavior vary | Keep the real-LLM behavior tests and run them after every prompt or model change |
-| **Latency** | 3 to 4 sequential LLM calls per question | Stream the final answer; skip the synthesizer when a single agent's output is already a good answer |
+| **Latency** | 2 to 3 sequential LLM calls per question (bounded by the 30 s budget) | Stream the final answer; skip the synthesizer when a single agent's output is already a good answer |
 | **Logs contain customers' questions** | Privacy | Rotate and restrict access; avoid logging full prompts in production |
 | **Cached schema description** | Schema changes need an app restart | Acceptable for a static schema |
 

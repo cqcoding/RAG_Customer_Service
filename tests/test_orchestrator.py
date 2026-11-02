@@ -4,12 +4,18 @@ All LLM calls and agents are mocked, so these need no network, model download
 or database. The agents themselves are tested in test_agents.py.
 """
 import json
+import time
+from datetime import date
 import unittest
 from unittest.mock import patch
+
+from src.config import get_settings
+from src.models.model_llm import LLMUnavailableError
 
 from src.agents.orchestrator import (
     FALLBACK_ANSWER,
     answer,
+    run,
     classify_query,
     route_to_agents,
     synthesize_results,
@@ -105,6 +111,18 @@ class TestSynthesize(unittest.TestCase):
         self.assertIn('"status": "delivered"', messages[-1]["content"])
 
     @patch("src.agents.orchestrator.synth_llm")
+    def test_prompt_has_today_and_policy_rules(self, mock_synth, _logger):
+        mock_synth.invoke.return_value = reply("ok")
+
+        synthesize_results({"query": "Posso devolver o pedido 7?", "results": [
+            {"source": "question_answerer", "result": {"excerpts": [{"text": "até 7 dias corridos"}]}}]})
+
+        system = mock_synth.invoke.call_args[0][0][0]["content"]
+        self.assertIn(f"Today is {date.today().isoformat()}", system)
+        self.assertIn("excerpts of the store policy", system)
+        self.assertIn("até 7 dias corridos", mock_synth.invoke.call_args[0][0][-1]["content"])
+
+    @patch("src.agents.orchestrator.synth_llm")
     def test_no_results_uses_strict_prompt_without_facts(self, mock_synth, _logger):
         mock_synth.invoke.return_value = reply("Desculpe, só ajudo com assuntos da loja.")
 
@@ -140,11 +158,43 @@ class TestWorkflow(unittest.TestCase):
         result = answer("Meu pedido 4 chegou com defeito, posso trocar?")
 
         self.assertEqual(result, "Pode trocar em até 7 dias.")
-        mock_sql.assert_called_once_with("Status e itens do pedido 4?")
+        self.assertEqual(mock_sql.call_args.args, ("Status e itens do pedido 4?",))
         mock_qa.assert_called_once_with("Política de troca para defeito?")
         synth_input = mock_synth.invoke.call_args[0][0][-1]["content"]
         self.assertIn("store_database", synth_input)
         self.assertIn("question_answerer", synth_input)
+
+    def test_one_deadline_is_shared_by_every_llm_call(self, mock_sql, mock_qa, mock_router, mock_synth, _logger):
+        mock_router.invoke.return_value = reply(route(("store_database", "estoque?")))
+        mock_sql.return_value = {"status": "success", "rows": []}
+        mock_synth.invoke.return_value = reply("ok")
+
+        before = time.monotonic()
+        state = run("Tem estoque?")
+
+        limit = get_settings().question_time_limit_s
+        self.assertAlmostEqual(state["deadline"], before + limit, delta=1)
+        self.assertEqual(mock_router.invoke.call_args.kwargs["deadline"], state["deadline"])
+        self.assertEqual(mock_sql.call_args.kwargs["deadline"], state["deadline"])
+        self.assertEqual(mock_synth.invoke.call_args.kwargs["deadline"], state["deadline"])
+
+    def test_run_exposes_route_and_agent_results(self, mock_sql, mock_qa, mock_router, mock_synth, _logger):
+        mock_router.invoke.return_value = reply(route(("question_answerer", "Endereço da loja?")))
+        mock_qa.return_value = {"status": "success", "excerpts": [{"source": "p.pdf", "page": 1, "text": "Rua X"}]}
+        mock_synth.invoke.return_value = reply("Ficamos na Rua X.")
+
+        state = run("Qual o endereço da loja?")
+
+        self.assertEqual(state["final_answer"], "Ficamos na Rua X.")
+        self.assertEqual(state["classifications"], [{"source": "question_answerer", "query": "Endereço da loja?"}])
+        self.assertEqual(state["results"][0]["result"]["excerpts"][0]["text"], "Rua X")
+
+    def test_time_limit_reached_gives_the_fallback(self, mock_sql, mock_qa, mock_router, mock_synth, _logger):
+        mock_router.invoke.side_effect = LLMUnavailableError("Tempo limite da pergunta esgotado")
+        mock_synth.invoke.side_effect = LLMUnavailableError("Tempo limite da pergunta esgotado")
+
+        self.assertEqual(answer("Tem estoque?"), FALLBACK_ANSWER)
+        mock_sql.assert_not_called()
 
     def test_small_talk_skips_agents(self, mock_sql, mock_qa, mock_router, mock_synth, _logger):
         mock_router.invoke.return_value = reply(route())

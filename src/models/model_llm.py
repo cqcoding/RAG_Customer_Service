@@ -5,6 +5,12 @@ from requests.exceptions import HTTPError
 from src.config import get_settings
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+REQUEST_TIMEOUT_S = 60
+# Don't start an attempt with less time than this left before the deadline.
+MIN_ATTEMPT_S = 1.0
+# Errors that fail the same way on every model (same key, same account):
+# trying the fallback models would only waste time.
+NON_RETRYABLE_STATUS = {401: "chave de API inválida", 402: "créditos insuficientes", 403: "acesso negado"}
 
 
 class LLMUnavailableError(Exception):
@@ -26,18 +32,33 @@ class OpenRouterLLM:
         self.temperature = temperature
         self.enable_fallback = enable_fallback
 
-    def invoke(self, messages, max_retries: int = 3, initial_delay: int = 2):
+    def invoke(self, messages, max_retries: int = 3, initial_delay: int = 2, deadline: float | None = None):
         """
         Faz requisição à API com retry automático em caso de rate limit (429).
         Se enable_fallback=True, tenta outros modelos em caso de erro.
+
+        deadline: valor de time.monotonic() após o qual nenhuma tentativa nova
+        começa; timeouts e esperas são limitados ao tempo restante.
         """
-        # Try default model first, then fallbacks if enabled
-        models_to_try = [self.model] + (self.FALLBACK_MODELS if self.enable_fallback else [])
-        
+        # Try default model first, then fallbacks if enabled (each model once).
+        models_to_try = list(dict.fromkeys(
+            [self.model] + (self.FALLBACK_MODELS if self.enable_fallback else [])))
+
+        def remaining():
+            return None if deadline is None else deadline - time.monotonic()
+
+        def can_wait(seconds):
+            left = remaining()
+            return left is None or left - seconds >= MIN_ATTEMPT_S
+
         for model in models_to_try:
             retry_delay = initial_delay
-            
+
             for attempt in range(max_retries):
+                left = remaining()
+                if left is not None and left < MIN_ATTEMPT_S:
+                    raise LLMUnavailableError(f"Tempo limite da pergunta esgotado (antes de chamar {model})")
+                timeout = REQUEST_TIMEOUT_S if left is None else min(REQUEST_TIMEOUT_S, left)
                 try:
                     response = requests.post(
                         url=OPENROUTER_URL,
@@ -50,7 +71,7 @@ class OpenRouterLLM:
                             "temperature": self.temperature,
                             "messages": messages,
                         },
-                        timeout=60,
+                        timeout=timeout,
                     )
                     response.raise_for_status()
                     
@@ -67,8 +88,13 @@ class OpenRouterLLM:
                     }
                     
                 except HTTPError as e:
-                    if e.response.status_code == 429:
-                        if attempt < max_retries - 1:
+                    status = e.response.status_code
+                    if status in NON_RETRYABLE_STATUS:
+                        raise LLMUnavailableError(
+                            f"Erro HTTP {status} ({NON_RETRYABLE_STATUS[status]}): não adianta tentar outros modelos"
+                        ) from e
+                    if status == 429:
+                        if attempt < max_retries - 1 and can_wait(retry_delay):
                             print(f"Rate limit (429) com {model}. Tentativa {attempt + 1}/{max_retries}. Aguardando {retry_delay}s...")
                             time.sleep(retry_delay)
                             retry_delay *= 2
@@ -85,7 +111,7 @@ class OpenRouterLLM:
                     break
                 
                 except requests.exceptions.Timeout:
-                    if attempt < max_retries - 1:
+                    if attempt < max_retries - 1 and can_wait(retry_delay):
                         print(f"Timeout com {model}. Tentativa {attempt + 1}/{max_retries}. Aguardando {retry_delay}s...")
                         time.sleep(retry_delay)
                         retry_delay *= 2

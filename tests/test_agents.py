@@ -4,12 +4,13 @@ Unit tests for the agents and the LLM client.
 Everything external is mocked (LLM, retriever, database, HTTP), so these run
 anywhere with no API key, embedding model or PostgreSQL:
   - BaseAgent:   JSON cleanup shared by all agents
-  - qa_agent:    RAG over the store policy PDF
+  - qa_agent:    retrieval of policy excerpts (no LLM)
   - sql_agent:   query generation, retry and refusal logic (the real
                  database is exercised in test_sql_agent.py)
-  - OpenRouterLLM: retry on rate limits and fallback to other models
+  - OpenRouterLLM: retries, fallback to other models, and the time limit
 """
 import json
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -17,7 +18,7 @@ from langchain_core.documents import Document
 from requests.exceptions import HTTPError
 
 from src.agents.base_agent import BaseAgent
-from src.agents.qa_agent import question_answering_with_retrieval, run_policy_qa
+from src.agents.qa_agent import run_policy_qa
 from src.agents.sql_agent import run_sql_agent
 from src.models.model_llm import LLMUnavailableError, OpenRouterLLM
 from src.utils.sql_database import UnsafeQueryError
@@ -59,115 +60,63 @@ class TestBaseAgent(unittest.TestCase):
         plain = '{"sql": "SELECT 1", "reason": null}'
         self.assertEqual(BaseAgent.clean_json(plain), plain)
 
-    @patch("src.agents.base_agent.get_retriever")
-    @patch("src.agents.base_agent.OpenRouterLLM")
-    def test_init_builds_llm_and_retriever(self, mock_llm_class, mock_get_retriever):
-        agent = BaseAgent(model_name="test-model")
-
-        mock_llm_class.assert_called_once_with(temperature=0, model="test-model")
-        self.assertIs(agent.retriever, mock_get_retriever.return_value)
-
 
 # --------------------------------------------------------------------------
-# Policy QA agent (RAG over the PDF)
+# Policy agent (retrieval over the PDF)
 # --------------------------------------------------------------------------
 
-@patch("src.agents.qa_agent.OpenRouterLLM")
-@patch("src.agents.qa_agent.get_agent")
+@patch("src.agents.qa_agent._retriever")
 class TestPolicyQAAgent(unittest.TestCase):
-    def setUp(self):
-        self.answer = {
-            "reasoning": "A seção de trocas informa o prazo.",
-            "final_answer": "Você pode devolver o produto em até 7 dias após o recebimento.",
-            "sources": ["políticas_da_loja.pdf"],
-        }
-
-    def test_answers_from_retrieved_policy(self, mock_get_agent, mock_llm_class):
-        mock_get_agent.return_value.retriever.invoke.return_value = [
-            policy_doc("Trocas e devoluções em até 7 dias após o recebimento.", page=2)]
-        mock_llm_class.return_value.invoke.return_value = llm_reply(self.answer)
-
-        result = question_answering_with_retrieval("Qual o prazo para devolução?")
-
-        self.assertEqual(result["final_answer"], self.answer["final_answer"])
-        self.assertEqual(result["sources"], ["políticas_da_loja.pdf"])
-        self.assertEqual(result["model_used"], "mock-model")
-
-    def test_prompt_contains_context_question_and_rules(self, mock_get_agent, mock_llm_class):
-        mock_get_agent.return_value.retriever.invoke.return_value = [
-            policy_doc("Garantia de 12 meses contra defeitos de fabricação.", page=4),
-            policy_doc("Frete grátis acima de R$ 500.", page=5),
+    def test_returns_the_retrieved_excerpts(self, mock_retriever):
+        mock_retriever.return_value.invoke.return_value = [
+            policy_doc("O cliente pode solicitar a devolução em até 7 (sete) dias corridos.", page=3),
+            policy_doc("Rua 14 de Maio, 3200 — Centro, Campo Grande – MS", page=0),
         ]
-        mock_llm_class.return_value.invoke.return_value = llm_reply(self.answer)
 
-        question_answering_with_retrieval("Como funciona a garantia?")
+        result = run_policy_qa("Posso devolver minha compra?")
 
-        prompt = mock_llm_class.return_value.invoke.call_args[0][0][0]["content"]
-        self.assertIn("Garantia de 12 meses", prompt)
-        self.assertIn("Frete grátis acima de R$ 500.", prompt)
-        self.assertIn("Document 2 (Source: " + POLICY_PDF, prompt)
-        self.assertIn("Como funciona a garantia?", prompt)
-        self.assertIn("music store", prompt)
-        self.assertIn("EXCLUSIVELY", prompt)
-        self.assertNotIn("financial", prompt.lower())
+        mock_retriever.return_value.invoke.assert_called_once_with("Posso devolver minha compra?")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["excerpts"], [
+            {"source": "políticas_da_loja.pdf", "page": 4,
+             "text": "O cliente pode solicitar a devolução em até 7 (sete) dias corridos."},
+            {"source": "políticas_da_loja.pdf", "page": 1,
+             "text": "Rua 14 de Maio, 3200 — Centro, Campo Grande – MS"},
+        ])
+        self.assertEqual(result["sources"], ["políticas_da_loja.pdf, p. 1", "políticas_da_loja.pdf, p. 4"])
 
-    def test_fenced_json_reply_is_parsed(self, mock_get_agent, mock_llm_class):
-        mock_get_agent.return_value.retriever.invoke.return_value = [policy_doc("Pix, boleto e cartão.")]
-        mock_llm_class.return_value.invoke.return_value = llm_reply(
-            "```json\n" + json.dumps(self.answer, ensure_ascii=False) + "\n```")
+    def test_does_not_call_an_llm(self, mock_retriever):
+        mock_retriever.return_value.invoke.return_value = [policy_doc("Pix, boleto e cartão.")]
 
-        result = question_answering_with_retrieval("Quais as formas de pagamento?")
+        with patch("src.models.model_llm.requests.post") as mock_post:
+            run_policy_qa("Quais as formas de pagamento?")
 
-        self.assertEqual(result["reasoning"], self.answer["reasoning"])
+        mock_post.assert_not_called()
 
-    def test_no_documents_skips_the_llm(self, mock_get_agent, mock_llm_class):
-        mock_get_agent.return_value.retriever.invoke.return_value = []
+    def test_nothing_retrieved(self, mock_retriever):
+        mock_retriever.return_value.invoke.return_value = []
 
-        result = question_answering_with_retrieval("Vocês vendem carros?")
+        result = run_policy_qa("Vocês vendem carros?")
 
-        self.assertIsInstance(result, dict)
-        self.assertIn("No relevant documents", result["reasoning"])
-        self.assertEqual(result["sources"], [])
-        mock_llm_class.return_value.invoke.assert_not_called()
+        self.assertEqual(result, {"query": "Vocês vendem carros?", "status": "not_found",
+                                  "excerpts": [], "sources": []})
 
-    def test_run_policy_qa_success_shape(self, mock_get_agent, mock_llm_class):
-        mock_get_agent.return_value.retriever.invoke.return_value = [policy_doc("7 dias.")]
-        mock_llm_class.return_value.invoke.return_value = llm_reply(self.answer)
+    def test_missing_page_metadata(self, mock_retriever):
+        mock_retriever.return_value.invoke.return_value = [
+            Document(page_content="Texto", metadata={"source": POLICY_PDF})]
 
-        result = run_policy_qa("Qual o prazo para devolução?")
+        result = run_policy_qa("?")
 
-        self.assertEqual(result, {
-            "query": "Qual o prazo para devolução?",
-            "reasoning": self.answer["reasoning"],
-            "final_answer": self.answer["final_answer"],
-            "sources": self.answer["sources"],
-            "status": "success",
-        })
+        self.assertIsNone(result["excerpts"][0]["page"])
+        self.assertEqual(result["sources"], ["políticas_da_loja.pdf"])
 
-    def test_run_policy_qa_invalid_json(self, mock_get_agent, mock_llm_class):
-        mock_get_agent.return_value.retriever.invoke.return_value = [policy_doc("7 dias.")]
-        mock_llm_class.return_value.invoke.return_value = llm_reply("Desculpe, não sei responder.")
+    def test_retriever_failure(self, mock_retriever):
+        mock_retriever.return_value.invoke.side_effect = RuntimeError("Chroma unavailable")
 
         result = run_policy_qa("Qual o prazo?")
 
-        self.assertEqual(result["status"], "error")
-        self.assertIn("Failed to parse JSON", result["error"])
-
-    def test_run_policy_qa_retriever_failure(self, mock_get_agent, mock_llm_class):
-        mock_get_agent.return_value.retriever.invoke.side_effect = Exception("Chroma unavailable")
-
-        result = run_policy_qa("Qual o prazo?")
-
-        self.assertEqual(result, {"query": "Qual o prazo?", "error": "Chroma unavailable", "status": "error"})
-
-    def test_run_policy_qa_llm_failure(self, mock_get_agent, mock_llm_class):
-        mock_get_agent.return_value.retriever.invoke.return_value = [policy_doc("7 dias.")]
-        mock_llm_class.return_value.invoke.side_effect = Exception("Todos os modelos falharam")
-
-        result = run_policy_qa("Qual o prazo?")
-
-        self.assertEqual(result["status"], "error")
-        self.assertIn("Todos os modelos falharam", result["error"])
+        self.assertEqual(result, {"query": "Qual o prazo?", "status": "error",
+                                  "error": "RuntimeError: Chroma unavailable"})
 
 
 # --------------------------------------------------------------------------
@@ -278,6 +227,14 @@ class TestSqlAgent(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("Todos os modelos falharam", result["error"])
 
+    def test_deadline_is_passed_to_the_llm(self, mock_llm, mock_query, _schema):
+        mock_llm.invoke.return_value = llm_reply({"sql": "SELECT 1"})
+        mock_query.return_value = query_result([{"?column?": 1}])
+
+        run_sql_agent("?", deadline=1234.5)
+
+        self.assertEqual(mock_llm.invoke.call_args.kwargs["deadline"], 1234.5)
+
 
 # --------------------------------------------------------------------------
 # OpenRouterLLM client: retries and model fallback
@@ -352,6 +309,83 @@ class TestOpenRouterLLM(unittest.TestCase):
             OpenRouterLLM(model="model-a", enable_fallback=False).invoke([])
 
         self.assertEqual(mock_post.call_count, 1)
+
+    def test_each_model_is_tried_once(self, mock_post, _sleep):
+        # The router's model is also the last fallback: it must not be tried twice.
+        mock_post.return_value = http_response(500, text="down")
+
+        with self.assertRaises(LLMUnavailableError):
+            OpenRouterLLM(model=OpenRouterLLM.FALLBACK_MODELS[-1]).invoke([])
+
+        tried = [c.kwargs["json"]["model"] for c in mock_post.call_args_list]
+        self.assertEqual(len(tried), len(set(tried)))
+        self.assertEqual(set(tried), set(OpenRouterLLM.FALLBACK_MODELS))
+
+    def test_auth_and_credit_errors_do_not_fall_back(self, mock_post, _sleep):
+        for status in (401, 402, 403):
+            with self.subTest(status=status):
+                mock_post.reset_mock()
+                mock_post.return_value = http_response(status, text="no")
+
+                with self.assertRaises(LLMUnavailableError) as ctx:
+                    OpenRouterLLM(model="model-a").invoke([])
+
+                self.assertIn(str(status), str(ctx.exception))
+                self.assertEqual(mock_post.call_count, 1)
+
+
+@patch("src.models.model_llm.time.sleep")
+@patch("src.models.model_llm.requests.post")
+class TestOpenRouterLLMTimeLimit(unittest.TestCase):
+    def test_no_attempt_once_the_deadline_passed(self, mock_post, _sleep):
+        with self.assertRaises(LLMUnavailableError) as ctx:
+            OpenRouterLLM(model="model-a").invoke([], deadline=time.monotonic() - 1)
+
+        self.assertIn("Tempo limite", str(ctx.exception))
+        mock_post.assert_not_called()
+
+    def test_request_timeout_is_capped_by_the_deadline(self, mock_post, _sleep):
+        mock_post.return_value = http_response(200, completion("ok", "model-a"))
+
+        OpenRouterLLM(model="model-a").invoke([], deadline=time.monotonic() + 10)
+
+        timeout = mock_post.call_args.kwargs["timeout"]
+        self.assertLessEqual(timeout, 10)
+        self.assertGreater(timeout, 9)
+
+    def test_without_deadline_the_timeout_is_the_default(self, mock_post, _sleep):
+        mock_post.return_value = http_response(200, completion("ok", "model-a"))
+
+        OpenRouterLLM(model="model-a").invoke([])
+
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], 60)
+
+    def test_no_retry_wait_that_would_pass_the_deadline(self, mock_post, mock_sleep):
+        # 2.5 s left: waiting 2 s for a 429 retry would leave less than 1 s,
+        # so the client moves straight to the next model instead of sleeping.
+        mock_post.return_value = http_response(429)
+
+        with self.assertRaises(LLMUnavailableError):
+            OpenRouterLLM(model="model-a").invoke([], deadline=time.monotonic() + 2.5)
+
+        mock_sleep.assert_not_called()
+        self.assertEqual(mock_post.call_count, 1 + len(OpenRouterLLM.FALLBACK_MODELS))
+
+    def test_stops_when_time_runs_out_between_models(self, mock_post, _sleep):
+        clock = {"now": 100.0}
+
+        def slow_failure(*args, **kwargs):
+            clock["now"] += 20     # each attempt takes 20 s and fails
+            return http_response(500, text="down")
+
+        mock_post.side_effect = slow_failure
+        with patch("src.models.model_llm.time.monotonic", side_effect=lambda: clock["now"]):
+            with self.assertRaises(LLMUnavailableError) as ctx:
+                OpenRouterLLM(model="model-a").invoke([], deadline=130.0)
+
+        self.assertIn("Tempo limite", str(ctx.exception))
+        self.assertEqual(mock_post.call_count, 2)                 # at 100 s and 120 s, not at 140 s
+        self.assertLessEqual(mock_post.call_args_list[1].kwargs["timeout"], 10)
 
 
 if __name__ == "__main__":

@@ -117,9 +117,8 @@ Two examples of me changing direction during the work:
 
 - **Authentication.** The AI started implementing customer authentication
   with PostgreSQL row-level security. Mid-way, I decided it wasn't needed at
-  this stage and asked to drop it. It was removed, and the design is recorded
-  in [ARCHITECTURE.md §12.2](ARCHITECTURE.md#122-customer-authentication-built-then-deliberately-removed)
-  in case it's needed later.
+  this stage and asked to drop it. It was removed, and the design stays in
+  the git history in case it's needed later.
 - **Upload endpoint.** While the documentation was being written, I decided
   the project doesn't need file uploads, and the endpoint and its leftovers
   were removed.

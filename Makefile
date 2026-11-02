@@ -1,4 +1,4 @@
-.PHONY: help setup install test lint clean run db-up load-db docker-up docker-down docker-logs
+.PHONY: help setup install test lint examples clean run db-up load-db docker-up docker-down docker-logs
 
 help:
 	@echo "RAG_Customer_Service - RAG System"
@@ -8,6 +8,7 @@ help:
 	@echo "  make install    - Install dependencies in existing venv"
 	@echo "  make test       - Run tests"
 	@echo "  make lint       - Check the code with ruff"
+	@echo "  make examples   - Regenerate docs/EXAMPLES.md with the real system"
 	@echo "  make db-up      - Start PostgreSQL (docker compose)"
 	@echo "  make load-db    - Load CSVs into PostgreSQL and the PDF into Chroma"
 	@echo "  make docker-up  - Build and run everything in Docker (chat on :8501, API on :8000)"
@@ -53,6 +54,9 @@ docker-logs:
 
 lint:
 	ruff check
+
+examples:
+	python -m src.utils.generate_examples
 
 clean:
 	@echo "Cleaning up..."
