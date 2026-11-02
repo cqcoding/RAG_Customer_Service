@@ -1,6 +1,7 @@
 import json
 import operator
 import time
+from datetime import date
 from typing import Annotated, Literal, Optional, TypedDict
 
 from dotenv import load_dotenv
@@ -46,6 +47,8 @@ class RouterState(TypedDict, total=False):
     classifications: list[Classification]
     results: Annotated[list[AgentOutput], operator.add]  # Reducer collects parallel results
     final_answer: str
+    # time.monotonic() value after which no new LLM call starts (see answer()).
+    deadline: Optional[float]
 
 
 def _recent_history(state: RouterState) -> list[ChatMessage]:
@@ -91,7 +94,7 @@ def question_answerer(state: RouterState) -> dict:
 def store_database(state: RouterState) -> dict:
     """SQL agent for products, prices, stock, promotions and orders."""
     return _run_agent("store_database", state["query"],
-                      lambda: run_sql_agent(state["query"]))
+                      lambda: run_sql_agent(state["query"], deadline=state.get("deadline")))
 
 
 settings = get_settings()
@@ -112,9 +115,9 @@ For each relevant agent, generate a targeted sub-question optimized for that age
 Keep sub-questions in the customer's language.
 
 Available agents:
-- question_answerer: store POLICIES from the policy document: returns and
-  exchanges, warranty, shipping rules and deadlines, payment conditions,
-  privacy, how the store works in general.
+- question_answerer: the store's POLICY document: returns and exchanges,
+  warranty, shipping rules and deadlines, payment conditions, privacy, and
+  general store information (address, contact, opening hours, WhatsApp).
 - store_database: live STORE DATA from the database: product catalog, prices,
   promotions/discounts, stock availability, product specs, categories, and
   orders by number (status, tracking code, delivery date, items).
@@ -158,7 +161,7 @@ def classify_query(state: RouterState) -> dict:
         result = router_llm.invoke([
             {"role": "system", "content": ROUTER_PROMPT},
             {"role": "user", "content": router_input},
-        ])
+        ], deadline=state.get("deadline"))
         latency_ms = (time.time() - start_time) * 1000
 
         # Models often wrap JSON in ```json fences; strip them before parsing.
@@ -203,6 +206,7 @@ def route_to_agents(state: RouterState):
 
 
 SYNTH_PROMPT = """You are the customer service assistant of a Brazilian music store.
+Today is {today}.
 
 Reply to the customer's latest message: "{query}"
 
@@ -211,7 +215,11 @@ Reply to the customer's latest message: "{query}"
   details or policies
 - store_database results are rows from the store database: trust them for
   prices, stock and order data; format money as R$ 1.234,56
-- question_answerer results come from the store policy document
+- question_answerer results are excerpts of the store policy document. Answer
+  from them, quote exact deadlines, values and conditions, and apply them to
+  the customer's situation (e.g. compare a deadline with an order's dates and
+  today's date). If the excerpts don't cover the question, say you don't have
+  that information instead of guessing
 - To check an order, the customer must give its order number or tracking code
 - Never reveal customers' personal data (names, phones, e-mails)
 - Combine information from multiple sources without redundancy
@@ -261,7 +269,8 @@ def synthesize_results(state: RouterState) -> dict:
 
     if results:
         messages = [
-            {"role": "system", "content": SYNTH_PROMPT.format(query=state["query"])},
+            {"role": "system", "content": SYNTH_PROMPT.format(
+                today=date.today().isoformat(), query=state["query"])},
             *_recent_history(state),
             {"role": "user", "content": f"{state['query']}\n\nRESULTS:\n{formatted}"},
         ]
@@ -273,7 +282,7 @@ def synthesize_results(state: RouterState) -> dict:
         ]
 
     try:
-        response = synth_llm.invoke(messages)
+        response = synth_llm.invoke(messages, deadline=state.get("deadline"))
         latency_ms = (time.time() - start_time) * 1000
         final_answer = response["content"]
 
@@ -329,13 +338,20 @@ workflow = (
 )
 
 
-def answer(query: str, history: Optional[list[ChatMessage]] = None) -> str:
-    """Convenience entry point for the API and the front-end."""
-    state = workflow.invoke({
+def run(query: str, history: Optional[list[ChatMessage]] = None) -> RouterState:
+    """Answer one message and return the full final state: the answer plus the
+    routing decision and each agent's result (used by the examples script)."""
+    return workflow.invoke({
         "query": query,
         "history": history or [],
         "classifications": [],
         "results": [],
         "final_answer": "",
+        # One time budget for the whole question: router, agents and synthesis.
+        "deadline": time.monotonic() + settings.question_time_limit_s,
     })
-    return state.get("final_answer", "")
+
+
+def answer(query: str, history: Optional[list[ChatMessage]] = None) -> str:
+    """Entry point for the API and the front-end: just the reply."""
+    return run(query, history).get("final_answer", "")

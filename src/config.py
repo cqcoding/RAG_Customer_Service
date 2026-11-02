@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     database_reader_user: str = Field(default='store_reader')
     database_reader_password: str = Field(default='store_reader')
     router_llm_model: str = Field(default='google/gemini-2.5-flash-lite')
+    # Time budget for one question (all LLM calls together), in seconds.
+    question_time_limit_s: float = Field(default=30.0)
 
 def get_settings() -> Settings:
     return Settings()

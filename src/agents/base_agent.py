@@ -1,17 +1,8 @@
-from src.utils.retriever import get_retriever
-from src.models.model_llm import OpenRouterLLM
 import re
 
 
-# Functions common to all agents
+# Helpers shared by the agents
 class BaseAgent:
-    def __init__(self, model_name: str):
-        self.llm = OpenRouterLLM(
-            temperature=0,
-            model=model_name
-        )
-        self.retriever = get_retriever()
-
     @staticmethod
     def clean_json(text: str) -> str:
         """Strip an optional ```json ... ``` fence around a model's JSON reply."""

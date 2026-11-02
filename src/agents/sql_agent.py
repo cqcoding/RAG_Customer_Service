@@ -49,14 +49,15 @@ or, if the question cannot or must not be answered from this database:
 llm = OpenRouterLLM(temperature=0)
 
 
-def _generate_sql(messages: list[dict]) -> dict:
-    response = llm.invoke(messages)
+def _generate_sql(messages: list[dict], deadline: float | None) -> dict:
+    response = llm.invoke(messages, deadline=deadline)
     content = response["content"]
     messages.append({"role": "assistant", "content": content})
     return json.loads(BaseAgent.clean_json(content))
 
 
-def run_sql_agent(query: str) -> dict:
+def run_sql_agent(query: str, deadline: float | None = None) -> dict:
+    """deadline: time.monotonic() value shared by the whole question (see orchestrator.run)."""
     messages = [
         {
             "role": "system",
@@ -66,7 +67,7 @@ def run_sql_agent(query: str) -> dict:
     ]
 
     try:
-        plan = _generate_sql(messages)
+        plan = _generate_sql(messages, deadline)
         if not plan.get("sql"):
             return {
                 "query": query,
@@ -85,7 +86,7 @@ def run_sql_agent(query: str) -> dict:
                 "content": f"The query failed with this error:\n{db_error}\n"
                            "Fix it and return the same JSON format.",
             })
-            plan = _generate_sql(messages)
+            plan = _generate_sql(messages, deadline)
             if not plan.get("sql"):
                 raise ValueError(plan.get("reason", "Could not write a valid query.")) from db_error
             result = run_readonly_query(plan["sql"])

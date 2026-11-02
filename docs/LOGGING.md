@@ -191,9 +191,10 @@ grep '"status": "error"' logs/llm_calls.jsonl | tail -n 5
 3. **Was the data right?** For `store_database`, look at the SQL in
    `output`, and run it yourself in `psql`. Wrong SQL usually means a column
    comment in `schema.sql` is missing or unclear.
-4. **Was the policy found?** For `question_answerer`, the `output` shows the
-   answer and the sources. If it says it couldn't find the information, the
-   retrieval missed the right chunk.
+4. **Was the policy found?** For `question_answerer`, the `output` starts
+   with the retrieved excerpts (the log keeps 200 characters; run
+   `python -m src.agents.qa_agent` to see them in full with their pages). If
+   the right passage isn't among them, retrieval missed it.
 5. **Did the synthesizer change the facts?** Compare the agents' outputs
    with the `synthesis` `final_answer`.
 

@@ -88,6 +88,9 @@ RUN_LLM_TESTS=1 pytest tests/test_llm_behavior.py -v   # real-LLM behavior tests
 ruff check                                          # lint (or: make lint)
 ```
 
+To regenerate the example conversations in [docs/EXAMPLES.md](docs/EXAMPLES.md)
+against the real system (needs the API key and loaded data): `make examples`.
+
 See [docs/TESTS.md](docs/TESTS.md).
 
 ---
@@ -97,6 +100,7 @@ See [docs/TESTS.md](docs/TESTS.md).
 
 | Document | Contents |
 |---|---|
+| [docs/EXAMPLES.md](docs/EXAMPLES.md) | Real example conversations (catalog, store information, prices, a return request applying the policy to a real order, guardrails), with the SQL and policy pages behind each answer |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, request flow, data layer, RAG pipeline, LLMs, design decisions and their history, limitations |
 | [docs/API.md](docs/API.md) | REST API reference with examples |
 | [docs/DOCKER.md](docs/DOCKER.md) | Docker setup, services, volumes, configuration, troubleshooting |
